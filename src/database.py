@@ -15,18 +15,26 @@ def initialize_database():
 
     # ACCOUNTS table
     cursor.execute('''
-        CREATE TABLE IF NOT EXISTS accounts (
-            account_id      TEXT PRIMARY KEY,
-            platform        TEXT,
-            username        TEXT,
-            created_at      TEXT,
-            follower_count  INTEGER DEFAULT 0,
-            following_count INTEGER DEFAULT 0,
-            total_posts     INTEGER DEFAULT 0,
-            account_age_days INTEGER DEFAULT 0,
-            is_verified     INTEGER DEFAULT 0,
-            language        TEXT DEFAULT 'unknown',
-            collected_at    TEXT
+        CREATE TABLE IF NOT EXISTS features (
+            account_id                TEXT PRIMARY KEY,
+            posts_per_day             REAL DEFAULT 0.0,
+            avg_posting_hour          REAL DEFAULT 0.0,
+            posting_hour_std          REAL DEFAULT 0.0,
+            hashtag_variety           REAL DEFAULT 0.0,
+            avg_engagement_rate       REAL DEFAULT 0.0,
+            content_length_avg        REAL DEFAULT 0.0,
+            platform                  TEXT,
+            is_bot                    INTEGER DEFAULT -1,
+            follower_following_ratio  REAL DEFAULT 0.0,
+            followers_per_day         REAL DEFAULT 0.0,
+            is_empty_account          INTEGER DEFAULT 0,
+            log_followers             REAL DEFAULT 0.0,
+            log_following             REAL DEFAULT 0.0,
+            log_posts                 REAL DEFAULT 0.0,
+            account_age_days          INTEGER DEFAULT 0,
+            favourites_count          INTEGER DEFAULT 0,
+            listed_count              INTEGER DEFAULT 0,
+            FOREIGN KEY (account_id) REFERENCES accounts(account_id)
         )
     ''')
 
