@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime
 from config import DB_PATH, BENCHMARK
 
-CRESCI_PATH = os.path.join(BENCHMARK, 'cresci-2017')
+CRESCI_PATH = os.path.join(BENCHMARK, "cresci-2017")
 
 
 # benchmark dataset haru
@@ -60,108 +60,98 @@ def safe_str(value, default=""):
 
 def find_folder(base_path, folder_name):
     """
-     Cresci-2017 has nested folders like:
-    social_spambots_1.csv/social_spambots_1.csv/users.csv
-    This function finds the correct inner path.
+    Handles Cresci-2017 double nested structure:
+    cresci-2017/genuine_accounts.csv/genuine_accounts.csv/users.csv
     """
-    # for nested path
-    nested = os.path.join(base_path, folder_name)
-    if os.path.exists(nested):
-        return nested
+    # Double nested (actual structure)
+    double_nested = os.path.join(base_path, folder_name, folder_name)
+    if os.path.exists(double_nested):
+        return double_nested
 
-    # for direct path
-    direct = os.path.join(base_path, folder_name)
-    if os.path.exists(direct):
-        return direct
+    # Single nested fallback
+    single = os.path.join(base_path, folder_name)
+    if os.path.exists(single):
+        return single
 
     return None
 
 
 def load_users(cursor, folder_path, dataset_name, is_bot):
-    """_loads users.csv from one dataset folder into accounts + features tables._
-
-    Args:
-        cursor (_type_): _description_
-        folder_path (_type_): _description_
-        dataset_name (_type_): _description_
-        is_bot (bool): _description_
     """
-
-    users_path = os.path.join(folder_path, "users,csv")
+    Loads users.csv from one dataset folder into accounts + features tables.
+    """
+    users_path = os.path.join(folder_path, "users.csv")  # fix 1: dot not comma
 
     if not os.path.exists(users_path):
-        print(f"users.csv not found in {dataset_name}")
+        print(f"    ⚠️  users.csv not found in {dataset_name}")
         return 0
 
     try:
-        df = pd.read_csv(users_path, low_memory=False)
+        df = pd.read_csv(users_path, low_memory=False, encoding='latin-1')
     except Exception as e:
-        print(f"could not read users.csv: {e}")
+        print(f"    ❌ Could not read users.csv: {e}")
         return 0
 
-    print(f" users.csv -> {len(df)} rows")
-    print(f"Columns: {list(df.columns)}")
+    print(f"    users.csv  → {len(df):>6} rows")
 
     loaded = 0
     for _, row in df.iterrows():
         try:
-            # account id
+            # Account ID 
             raw_id = row.get("id", row.get("Id", None))
             if pd.isna(raw_id) or raw_id is None:
                 account_id = f"cresci_{uuid.uuid4().hex[:8]}"
             else:
                 account_id = f"cresci_{int(float(raw_id))}"
 
-            # map colums - haldles variations in naming
-            username = safe_str(row["screen_name"])
-            created_at = safe_str(row["created_at"])
-            followers = safe_int(row["followers_count"])
-            following = safe_int(row["friends_count"])
+            # Column mapping
+            username    = safe_str(row["screen_name"])
+            created_at  = safe_str(row["created_at"])
+            followers   = safe_int(row["followers_count"])
+            following   = safe_int(row["friends_count"])
             total_posts = safe_int(row["statuses_count"])
-            favourites = safe_int(row["favourites_count"])
-            listed = safe_int(row["listed_count"])
-            lang = safe_str(row["lang"], default="unknown")
+            favourites  = safe_int(row["favourites_count"])
+            listed      = safe_int(row["listed_count"])
+            lang        = safe_str(row["lang"], default="unknown")
             is_verified = safe_int(row["verified"])
 
-            # insert into accounts
+            #Insert into accounts 
             cursor.execute(
                 """
-            INSERT OR IGNORE INTO accounts(
-                account_id, platform , username, create_at, follower_count, following_count , total_posts, is_verified, language , collected_at ) values(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            )""",
+                INSERT OR IGNORE INTO accounts (
+                    account_id, platform, username, created_at,
+                    follower_count, following_count, total_posts,
+                    is_verified, language, collected_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
                 (
-                    account_id,
-                    "twitter",
-                    username,
-                    created_at,
-                    followers,
-                    following,
-                    total_posts,
-                    is_verified,
-                    lang,
-                    datetime.now().isoformat(),
-                ),
+                    account_id, "twitter", username, created_at,
+                    followers, following, total_posts,
+                    is_verified, lang, datetime.now().isoformat()
+                )
             )
 
-            # insert label into features
+            #Insert into features 
             cursor.execute(
                 """
-                           INSERT OR IGNORE INTO features (
-                               account_idm platform, is_bot, favourites_count, listed_count
-                           ) VALUES(?, ?, ?, ?, ?)
-                           """,
-                (account_id, "twitter", is_bot, favourites, listed),
+                INSERT OR IGNORE INTO features (
+                    account_id, platform, is_bot,
+                    favourites_count, listed_count
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (account_id, "twitter", is_bot, favourites, listed)
             )
+
             loaded += 1
 
         except Exception:
             continue
-        return loaded
-    
-    
+
+    return loaded  
+
 
 def load_tweets(cursor, folder_path, dataset_name):
-    """ Load tweets.csv using exact Cresci-2017 column names.
+    """Load tweets.csv using exact Cresci-2017 column names.
     Confirmed columns from actual file:
     id, text, user_id, retweet_count, favorite_count,
     num_hashtags, num_urls, num_mentions, created_at
@@ -172,43 +162,43 @@ def load_tweets(cursor, folder_path, dataset_name):
         dataset_name (_type_): _description_
     """
 
-    tweets_path = os.path.join(folder_path, 'tweets.csv')
+    tweets_path = os.path.join(folder_path, "tweets.csv")
     if not os.path.exists(tweets_path):
         print("tweets.csv not found")
         return 0
-    
+
     try:
-        df = pd.read_csv(tweets_path, low_memory=False)
+        df = pd.read_csv(tweets_path, low_memory=False, encoding='latin-1')
     except Exception as e:
         print(f"Read error: {e}")
         return 0
     print(f"tweets.csv ->{len(df):>6} rows")
-    
+
     loaded = 0
-    
+
     for _, row in df.iterrows():
         try:
             # ── Post ID ──────────────────────────────────────────────────────
-            raw_id = row.get('id', None)
+            raw_id = row.get("id", None)
             if pd.isna(raw_id) or raw_id is None:
                 post_id = f"tweet_{uuid.uuid4().hex[:8]}"
             else:
                 post_id = f"tweet_{int(float(raw_id))}"
 
             # ── Link to account ──────────────────────────────────────────────
-            raw_user_id = row.get('user_id', None)
+            raw_user_id = row.get("user_id", None)
             if pd.isna(raw_user_id) or raw_user_id is None:
                 continue
             account_id = f"cresci_{int(float(raw_user_id))}"
 
             # ── Exact column mapping ─────────────────────────────────────────
-            content      = safe_str(row['text'])
-            posted_at    = safe_str(row['created_at'])
-            likes        = safe_int(row['favorite_count'])
-            shares       = safe_int(row['retweet_count'])
-            num_hashtags = safe_int(row['num_hashtags'])
-            num_urls     = safe_int(row['num_urls'])
-            num_mentions = safe_int(row['num_mentions'])
+            content = safe_str(row["text"])
+            posted_at = safe_str(row["created_at"])
+            likes = safe_int(row["favorite_count"])
+            shares = safe_int(row["retweet_count"])
+            num_hashtags = safe_int(row["num_hashtags"])
+            num_urls = safe_int(row["num_urls"])
+            num_mentions = safe_int(row["num_mentions"])
 
             # Compute basic engagement rate ────────────────────────────────
             engagement = safe_float(likes + shares)
@@ -217,23 +207,35 @@ def load_tweets(cursor, folder_path, dataset_name):
             hashtags = f'{{"count": {num_hashtags}}}'
 
             #  Insert into posts ────────────────────────────────────────────
-            cursor.execute('''
+            cursor.execute(
+                """
                 INSERT OR IGNORE INTO posts (
                     post_id, account_id, platform, content,
                     topic_label, hashtags, posted_at,
                     likes, shares, comments_count,
                     engagement_rate, collected_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                post_id, account_id, 'twitter', content,
-                'benchmark', hashtags, posted_at,
-                likes, shares, 0,
-                engagement, datetime.now().isoformat()
-            ))
+            """,
+                (
+                    post_id,
+                    account_id,
+                    "twitter",
+                    content,
+                    "benchmark",
+                    hashtags,
+                    posted_at,
+                    likes,
+                    shares,
+                    0,
+                    engagement,
+                    datetime.now().isoformat(),
+                ),
+            )
 
             loaded += 1
 
-        except Exception:
+        except Exception as e:   
+            print(f"    ROW ERROR: {e}") 
             continue
 
     return loaded
@@ -242,33 +244,31 @@ def load_tweets(cursor, folder_path, dataset_name):
 def load_all_datasets():
     conn = get_connection()
     cursor = conn.cursor()
-    
+
     total_users = 0
     total_tweets = 0
-    
+
     for folder_name, is_bot in CRESCI_DATASETS.items():
-        
-        label = "HUMAN" if is_bot == 0 else 'BOT'
+        label = "HUMAN" if is_bot == 0 else "BOT"
         folder_path = find_folder(CRESCI_PATH, folder_name)
-           
+
         print(f"\n {folder_name} [{label}]")
         if folder_path is None:
             print(f"\n Folder not found , skipping")
             continue
         print(f" path: {folder_path}")
-        
-        users_loaded  = load_users(cursor, folder_path, folder_name, is_bot)
+
+        users_loaded = load_users(cursor, folder_path, folder_name, is_bot)
         tweets_loaded = load_tweets(cursor, folder_path, folder_name)
 
-        
-        total_users+= users_loaded
-        total_tweets+= tweets_loaded
-        
+        total_users += users_loaded
+        total_tweets += tweets_loaded
+
         print(f" Users: {users_loaded} | Tweets: {tweets_loaded}")
         conn.commit()
-        
+
     conn.close()
-    
+
     print(f"""
           
     -----------------------------------
@@ -280,39 +280,46 @@ def load_all_datasets():
           
           
           """)
-        
-    
+
+
 def verify_load():
     conn = get_connection()
     cursor = conn.cursor()
-    
-    print("\n Database row counts:")
-    for table in ['accounts', 'posts','features']:
-        cursor.execute(f"SELECT COUNT (*) FROM {table}")
+
+    print("\nDatabase row counts:")
+    for table in ['accounts', 'posts', 'features']:
+        cursor.execute(f"SELECT COUNT(*) FROM {table}")
         count = cursor.fetchone()[0]
-        print(f" {table:<20} {count:>20} rows")
-    print("\n Bot vs Human breakdown:")
+        print(f"   {table:<20} {count:>10} rows")
+
+    print("\nBot vs Human breakdown:")
     cursor.execute("""
-            SELECT is_bot , COUNT(*)
-            FROM features
-            GROUP BY is_bot
-            
-                   
-                   
-                   """)   
+        SELECT is_bot, COUNT(*) 
+        FROM features 
+        GROUP BY is_bot
+    """)
     for row in cursor.fetchall():
-        label = "HUMAN" if row[0] == 0 else 'Bot'
-        print(f" {label: <12} {row[0]:<20}"
-              f"followers={row[1]:<8}"
-              f"posts={row[2]:<8}"
-              f"lang={row[3]}")
-        
+        label = '👤 Human' if row[0] == 0 else '🤖 Bot'
+        print(f"   {label:<12} {row[1]:>8} accounts")
+
+    print("\nSample accounts (5):")
+    cursor.execute("""
+        SELECT a.username, a.follower_count, 
+               a.total_posts, a.language, f.is_bot
+        FROM accounts a
+        JOIN features f ON a.account_id = f.account_id
+        LIMIT 5
+    """)
+    for row in cursor.fetchall():
+        label = 'BOT' if row[4] == 1 else 'HUMAN'
+        print(f"   {label} {str(row[0]):<20} "
+              f"followers={row[1]:<8} "
+              f"posts={row[2]}")
+
     conn.close()
-    
+
+
 if __name__ == "__main__":
     print("Starting Cresci-2017 data load...\n")
     load_all_datasets()
     verify_load()
-    
-    
-
