@@ -63,7 +63,7 @@ def find_folder(base_path, folder_name):
     Handles Cresci-2017 double nested structure:
     cresci-2017/genuine_accounts.csv/genuine_accounts.csv/users.csv
     """
-    # Double nested (actual structure)
+    # Double nested 
     double_nested = os.path.join(base_path, folder_name, folder_name)
     if os.path.exists(double_nested):
         return double_nested
