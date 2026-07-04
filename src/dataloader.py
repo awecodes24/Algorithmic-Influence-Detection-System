@@ -54,6 +54,7 @@ def safe_str(value, default=""):
     try:
         if pd.isna(value):
             return default
+        return str(value).strip() 
     except (ValueError, TypeError):
         return default
 
@@ -234,8 +235,7 @@ def load_tweets(cursor, folder_path, dataset_name):
 
             loaded += 1
 
-        except Exception as e:   
-            print(f"    ROW ERROR: {e}") 
+        except Exception:
             continue
 
     return loaded
