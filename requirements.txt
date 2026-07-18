@@ -1,8 +1,16 @@
+# Data collection (src/collector.py, src/db.py)
+apify-client>=1.6.0
+python-dotenv>=1.0.0
+langdetect>=1.0.9
+vaderSentiment>=3.3.2
+
+# Modeling / analysis
 pandas>=2.2.0
 numpy>=1.26.0
 scikit-learn>=1.4.0
 hdbscan>=0.8.38
 networkx>=3.2.0
+
+# Dashboard
 streamlit>=1.35.0
 plotly>=5.18.0
-

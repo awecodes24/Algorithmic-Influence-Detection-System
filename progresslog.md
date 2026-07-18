@@ -25,7 +25,7 @@ Using Behavioural, Content and Network Analysis
 | Streamlit dashboard | 🔜 Not started |
 | Real-world data collection (Reddit/Apify) | 🔜 Not started |
 
-**Headline result so far:** our behavioral anomaly detector (Isolation Forest)
+**Headline result so far:** our behavioral anomaly detector (Isolation Forest)https://github.com/Blopinpg1/coordinated-influence-detector
 correctly separates bots from humans in the Cresci-2017 benchmark with an
 **AUC-ROC of 0.8397**, which meets the ≥0.80 target set in our proposal
 (Chapter 5, Expected Output) and is in line with the baseline reported in
