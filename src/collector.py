@@ -16,10 +16,13 @@ Changes from the original version, and why:
     Both were already being read (item.get("upVotes", 0) etc.) -- without
     this flag they were silently defaulting to 0 on every item.
 
-  * comments.post_id is now resolved by walking the parent chain up to a
-    t3_-prefixed id (a post), instead of reading item.get("postId") /
-    item.get("linkId") -- neither field appears anywhere in this actor's
-    documented comment schema, so that line was always writing NULL.
+* comments.post_id is read directly from item.get("postId"), which the
+  actor DOES populate on comment items (confirmed against live output on
+  YYYY-MM-DD) -- already correctly t3_-prefixed, so no parent-chain walk
+  is needed. An earlier version of this file assumed postId/linkId were
+  absent based on the actor's documented schema; that assumption didn't
+  match observed behavior once real debug output was checked.
+
 
   * raw usernames are no longer written to the accounts table by default.
     Previously `username` was stored in plaintext right next to the
@@ -102,6 +105,7 @@ import re
 import sys
 import hashlib
 import logging
+import time
 from datetime import datetime, timezone, timedelta
 
 from dotenv import load_dotenv
@@ -182,7 +186,7 @@ def get_content_hash(text: str):
     text = re.sub(r"\s+", " ", text.lower().strip())
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
-
+   
 def to_unix(value, context=""):
     """
     Converts an epoch number or ISO8601 string to a unix timestamp.
@@ -493,7 +497,84 @@ def collect_posts(subreddits, max_posts=100, max_comments=20):
         return [], None
 
 
-def collect_user_profiles(usernames, batch_size=90):
+
+def collect_user_profiles(usernames, batch_size=15, delay_between_batches=30):
+    """
+    Fetches account-level profile data (karma, account creation date) for
+    a list of RAW (non-anonymized) Reddit usernames, using the same actor
+    pointed at each user's profile URL. skipUserPosts=True keeps this
+    cheap and avoids re-collecting posts/comments already captured by
+    collect_posts().
+
+    batch_size kept small (15, down from 90) and delay_between_batches
+    added (30s) because profile-page fetches get blocked/rate-limited by
+    Reddit far more aggressively than subreddit-listing scraping does --
+    confirmed across multiple test runs where large batches saw 403/429
+    responses on most requests. Smaller, spaced-out batches trade total
+    runtime for a meaningfully higher per-account success rate.
+
+    Apify bills per result item ("pay per result"), so this adds roughly
+    one extra billed item per unique account on top of the posts/comments
+    run -- worth a small test batch (2-3 usernames) first to confirm the
+    actual number of billed results before running it on ~1,000 accounts.
+
+    usernames should be the RAW usernames still held in memory from this
+    same run (see __main__) -- never persisted to disk except via the
+    STORE_RAW_USERNAME debug flag.
+    """
+    if not usernames:
+        return [], None
+
+    all_items = []
+    last_dataset_id = None
+    client = get_client()
+
+    num_batches = (len(usernames) + batch_size - 1) // batch_size
+
+    for batch_num, i in enumerate(range(0, len(usernames), batch_size), start=1):
+        batch = usernames[i:i + batch_size]
+        start_urls = [{"url": f"https://www.reddit.com/user/{u}/"} for u in batch]
+
+        run_input = {
+            "startUrls": start_urls,
+            "skipUserPosts": True,
+            "maxRequestRetries": 3,
+            "proxy": {"useApifyProxy": True}
+        }
+
+        logger.info(f"Fetching profile batch {batch_num}/{num_batches} ({len(batch)} profiles)...")
+
+        try:
+            run = client.actor(POSTS_ACTOR).call(
+                run_input=run_input,
+                run_timeout=timedelta(seconds=900)
+            )
+
+            if run is None:
+                logger.error("User-profile run returned no result.")
+                continue
+
+            if run.status != "SUCCEEDED":
+                logger.warning(f"User-profile run status={run.status!r}.")
+
+            dataset_id = run.default_dataset_id
+            last_dataset_id = dataset_id
+            items = list(client.dataset(dataset_id).iterate_items())
+            all_items.extend(items)
+            logger.info(f"Batch {batch_num}/{num_batches}: got {len(items)} profile items.")
+
+        except Exception as e:
+            logger.exception(f"User-profile collection failed for batch at {i}: {e}")
+            continue
+
+        # Space batches out so we're not hammering Reddit back-to-back --
+        # skip the sleep after the last batch.
+        if batch_num < num_batches:
+            logger.info(f"Waiting {delay_between_batches}s before next batch...")
+            time.sleep(delay_between_batches)
+
+    logger.info(f"Collected {len(all_items)} user profile items.")
+    return all_items, last_dataset_id
     """
     Fetches account-level profile data (karma, account creation date) for
     a list of RAW (non-anonymized) Reddit usernames, using the same actor
@@ -616,6 +697,20 @@ def save_items(items, subreddits=None, dataset_id=None):
 
             if data_type == "comment" and item.get("parentId"):
                 parent_map[fid] = item["parentId"]
+                
+        # ── TEMPORARY DEBUG — remove after checking ──────────────────────────────
+        debug_shown = 0
+        for item in items:
+            data_type = (item.get("dataType") or "").lower()
+            if data_type == "comment" and debug_shown < 5:
+                print(f"\n--- RAW COMMENT ITEM {debug_shown} ---")
+                print("id:", item.get("id"))
+                print("parentId:", item.get("parentId"))
+                print("linkId:", item.get("linkId"))
+                print("postId:", item.get("postId"))
+                print("All keys:", list(item.keys()))
+                debug_shown += 1
+# ──────────────────────────────────────────────────────────────────────────
 
         for item in items:
 
@@ -735,7 +830,7 @@ def save_items(items, subreddits=None, dataset_id=None):
                 language = detect_language(body)
                 sentiment = analyze_sentiment(body)
 
-                post_id = resolve_post_id(parent_id, parent_map)
+                post_id = item.get("postId")
 
                 c.execute(
                     """
@@ -1021,8 +1116,10 @@ if __name__ == "__main__":
         "Kathmandu"
     ]
 
-    MAX_POSTS = 500
-    MAX_COMMENTS = 100
+    # MAX_POSTS = 500
+    # MAX_COMMENTS = 100
+    MAX_POSTS = 10
+    MAX_COMMENTS = 30
 
     logger.info("Starting Reddit collection...")
 

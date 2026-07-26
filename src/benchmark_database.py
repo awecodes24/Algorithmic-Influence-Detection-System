@@ -3,11 +3,10 @@
 
 import sqlite3
 import os
-
-DB_PATH = os.path.join(os.path.dirname(__file__), '..', 'data', 'influence.db')
+from config import BENCHMARK_DB_PATH
 
 def get_connection():
-    return sqlite3.connect(DB_PATH)
+    return sqlite3.connect(BENCHMARK_DB_PATH)
 
 def initialize_database():
     conn = get_connection()
@@ -82,6 +81,9 @@ def initialize_database():
             -- Extra Cresci-specific fields
             favourites_count     INTEGER DEFAULT 0,
             listed_count         INTEGER DEFAULT 0,
+            favourites_ratio     REAL DEFAULT 0.0,
+            listed_ratio         REAL DEFAULT 0.0,
+            log_favourites       REAL DEFAULT 0.0,
 
             -- Computed after tweet/post analysis
             avg_posting_hour     REAL DEFAULT 0.0,
@@ -89,6 +91,7 @@ def initialize_database():
             avg_engagement       REAL DEFAULT 0.0,
             content_length_avg   REAL DEFAULT 0.0,
             hashtag_rate         REAL DEFAULT 0.0,
+            
 
             -- From model outputs
             pagerank_score       REAL DEFAULT 0.0,
@@ -115,7 +118,7 @@ def initialize_database():
 
     conn.commit()
     conn.close()
-    print("Database initialized successfully at:", os.path.abspath(DB_PATH))
+    print("Database initialized successfully at:", os.path.abspath(BENCHMARK_DB_PATH))
     print("Tables created: accounts, posts, interactions, features, results")
 
 if __name__ == "__main__":

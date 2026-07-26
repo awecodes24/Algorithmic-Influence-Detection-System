@@ -15,7 +15,7 @@ import sqlite3
 
 
 from config import DB_PATH, WEIGHTS
-from database import get_connection
+from benchmark_database import get_connection
 
 print("\n--- Library Versions ---")
 print(f"pandas:     {pd.__version__}")

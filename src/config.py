@@ -6,6 +6,7 @@ import os
 BASE_DIR    = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR    = os.path.join(BASE_DIR, 'data')
 DB_PATH     = os.path.join(DATA_DIR, 'influence.db')
+BENCHMARK_DB_PATH = os.path.join(DATA_DIR, 'benchmark.db')   # NEW — Cresci-2017 only
 BENCHMARK   = os.path.join(DATA_DIR, 'benchmark')
 RAW         = os.path.join(DATA_DIR, 'raw')
 PROCESSED   = os.path.join(DATA_DIR, 'processed')
@@ -14,7 +15,7 @@ OUTPUTS     = os.path.join(BASE_DIR, 'outputs')
 # Model parameters (you will tune these later)
 ISOLATION_FOREST = {
     'n_estimators': 100,
-    'contamination': 0.1,   # expect ~10% anomalous accounts
+    'contamination': 0.24,   # expect ~10% anomalous accounts
     'random_state': 42
 }
 

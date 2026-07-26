@@ -12,11 +12,11 @@ from sklearn.ensemble import IsolationForest
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import roc_auc_score, classification_report, confusion_matrix
 
-from config import DB_PATH, ISOLATION_FOREST
+from config import BENCHMARK_DB_PATH, ISOLATION_FOREST
 
 
 def get_connection():
-    return sqlite3.connect(DB_PATH)
+    return sqlite3.connect(BENCHMARK_DB_PATH)
 
 
 def load_features_with_labels():
@@ -24,7 +24,7 @@ def load_features_with_labels():
     df = pd.read_sql(
         """
         SELECT
-            account_id,
+            account_id,   
             posts_per_day,
             follower_ratio,
             followers_per_day,
@@ -33,6 +33,9 @@ def load_features_with_labels():
             log_following,
             log_posts,
             account_age_days,
+            favourites_ratio,
+            listed_ratio,
+            log_favourites,
             is_bot
         FROM features
         WHERE is_bot != -1
@@ -52,7 +55,7 @@ def run_isolation_forest(df):
     feature_col = [
         'posts_per_day', 'follower_ratio', 'followers_per_day',
         'is_empty_account', 'log_followers', 'log_following',
-        'log_posts', 'account_age_days'
+        'log_posts', 'account_age_days','favourites_ratio','listed_ratio','log_favourites'
     ]
 
     X = df[feature_col].values

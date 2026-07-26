@@ -3,7 +3,7 @@ import sqlite3
 import os
 import uuid
 from datetime import datetime
-from config import DB_PATH, BENCHMARK
+from config import BENCHMARK_DB_PATH, BENCHMARK
 
 CRESCI_PATH = os.path.join(BENCHMARK, "cresci-2017")
 
@@ -24,7 +24,7 @@ CRESCI_DATASETS = {
 
 # database sanga connect garne
 def get_connection():
-    return sqlite3.connect(DB_PATH)
+    return sqlite3.connect(BENCHMARK_DB_PATH)
 
 
 # int ma convert garne value lai with try catch handling
@@ -54,7 +54,7 @@ def safe_str(value, default=""):
     try:
         if pd.isna(value):
             return default
-        return str(value).strip() 
+        return str(value).strip()
     except (ValueError, TypeError):
         return default
 
@@ -64,7 +64,7 @@ def find_folder(base_path, folder_name):
     Handles Cresci-2017 double nested structure:
     cresci-2017/genuine_accounts.csv/genuine_accounts.csv/users.csv
     """
-    # Double nested 
+    # Double nested
     double_nested = os.path.join(base_path, folder_name, folder_name)
     if os.path.exists(double_nested):
         return double_nested
@@ -88,7 +88,7 @@ def load_users(cursor, folder_path, dataset_name, is_bot):
         return 0
 
     try:
-        df = pd.read_csv(users_path, low_memory=False, encoding='latin-1')
+        df = pd.read_csv(users_path, low_memory=False, encoding="latin-1")
     except Exception as e:
         print(f"    ❌ Could not read users.csv: {e}")
         return 0
@@ -98,7 +98,7 @@ def load_users(cursor, folder_path, dataset_name, is_bot):
     loaded = 0
     for _, row in df.iterrows():
         try:
-            # Account ID 
+            # Account ID
             raw_id = row.get("id", row.get("Id", None))
             if pd.isna(raw_id) or raw_id is None:
                 account_id = f"cresci_{uuid.uuid4().hex[:8]}"
@@ -106,17 +106,17 @@ def load_users(cursor, folder_path, dataset_name, is_bot):
                 account_id = f"cresci_{int(float(raw_id))}"
 
             # Column mapping
-            username    = safe_str(row["screen_name"])
-            created_at  = safe_str(row["created_at"])
-            followers   = safe_int(row["followers_count"])
-            following   = safe_int(row["friends_count"])
+            username = safe_str(row["screen_name"])
+            created_at = safe_str(row["created_at"])
+            followers = safe_int(row["followers_count"])
+            following = safe_int(row["friends_count"])
             total_posts = safe_int(row["statuses_count"])
-            favourites  = safe_int(row["favourites_count"])
-            listed      = safe_int(row["listed_count"])
-            lang        = safe_str(row["lang"], default="unknown")
+            favourites = safe_int(row["favourites_count"])
+            listed = safe_int(row["listed_count"])
+            lang = safe_str(row["lang"], default="unknown")
             is_verified = safe_int(row["verified"])
 
-            #Insert into accounts 
+            # Insert into accounts
             cursor.execute(
                 """
                 INSERT OR IGNORE INTO accounts (
@@ -126,13 +126,20 @@ def load_users(cursor, folder_path, dataset_name, is_bot):
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    account_id, "twitter", username, created_at,
-                    followers, following, total_posts,
-                    is_verified, lang, datetime.now().isoformat()
-                )
+                    account_id,
+                    "twitter",
+                    username,
+                    created_at,
+                    followers,
+                    following,
+                    total_posts,
+                    is_verified,
+                    lang,
+                    datetime.now().isoformat(),
+                ),
             )
 
-            #Insert into features 
+            # Insert into features
             cursor.execute(
                 """
                 INSERT OR IGNORE INTO features (
@@ -140,7 +147,7 @@ def load_users(cursor, folder_path, dataset_name, is_bot):
                     favourites_count, listed_count
                 ) VALUES (?, ?, ?, ?, ?)
                 """,
-                (account_id, "twitter", is_bot, favourites, listed)
+                (account_id, "twitter", is_bot, favourites, listed),
             )
 
             loaded += 1
@@ -148,7 +155,7 @@ def load_users(cursor, folder_path, dataset_name, is_bot):
         except Exception:
             continue
 
-    return loaded  
+    return loaded
 
 
 def load_tweets(cursor, folder_path, dataset_name):
@@ -169,7 +176,7 @@ def load_tweets(cursor, folder_path, dataset_name):
         return 0
 
     try:
-        df = pd.read_csv(tweets_path, low_memory=False, encoding='latin-1')
+        df = pd.read_csv(tweets_path, low_memory=False, encoding="latin-1")
     except Exception as e:
         print(f"Read error: {e}")
         return 0
@@ -287,7 +294,7 @@ def verify_load():
     cursor = conn.cursor()
 
     print("\nDatabase row counts:")
-    for table in ['accounts', 'posts', 'features']:
+    for table in ["accounts", "posts", "features"]:
         cursor.execute(f"SELECT COUNT(*) FROM {table}")
         count = cursor.fetchone()[0]
         print(f"   {table:<20} {count:>10} rows")
@@ -299,7 +306,7 @@ def verify_load():
         GROUP BY is_bot
     """)
     for row in cursor.fetchall():
-        label = '👤 Human' if row[0] == 0 else '🤖 Bot'
+        label = "👤 Human" if row[0] == 0 else "🤖 Bot"
         print(f"   {label:<12} {row[1]:>8} accounts")
 
     print("\nSample accounts (5):")
@@ -311,10 +318,8 @@ def verify_load():
         LIMIT 5
     """)
     for row in cursor.fetchall():
-        label = 'BOT' if row[4] == 1 else 'HUMAN'
-        print(f"   {label} {str(row[0]):<20} "
-              f"followers={row[1]:<8} "
-              f"posts={row[2]}")
+        label = "BOT" if row[4] == 1 else "HUMAN"
+        print(f"   {label} {str(row[0]):<20} followers={row[1]:<8} posts={row[2]}")
 
     conn.close()
 
