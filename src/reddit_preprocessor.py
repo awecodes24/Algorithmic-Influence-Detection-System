@@ -164,8 +164,8 @@ def compute_all_features():
     conn = get_conn()
     c = conn.cursor()
 
-    c.execute("SELECT id, karma_score AS ks, comment_karma, link_karma FROM accounts")
-    # karma_score isn't a real accounts column in db.py -- compute it here
+    # karma_score isn't a real accounts column in db.py -- it's computed
+    # below from comment_karma + link_karma instead.
     c.execute("SELECT id, comment_karma, link_karma FROM accounts")
     accounts = c.fetchall()
 

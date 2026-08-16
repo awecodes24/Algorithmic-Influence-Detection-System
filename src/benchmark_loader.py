@@ -140,14 +140,19 @@ def load_users(cursor, folder_path, dataset_name, is_bot):
             )
 
             # Insert into features
+            # dataset_name is the CSV filename passed in from
+            # load_all_datasets()'s loop over CRESCI_DATASETS (e.g.
+            # "social_spambots_1.csv") -- stored verbatim so purity
+            # validation can group by exactly which campaign an account
+            # came from, not just its binary is_bot label.
             cursor.execute(
                 """
                 INSERT OR IGNORE INTO features (
                     account_id, platform, is_bot,
-                    favourites_count, listed_count
-                ) VALUES (?, ?, ?, ?, ?)
+                    favourites_count, listed_count, source_dataset
+                ) VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (account_id, "twitter", is_bot, favourites, listed),
+                (account_id, "twitter", is_bot, favourites, listed, dataset_name),
             )
 
             loaded += 1

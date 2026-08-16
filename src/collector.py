@@ -405,18 +405,32 @@ TOPIC_KEYWORDS = {
         "corruption", "scandal", "failure", "failed", "incompetent",
         "corrupt", "protest", "resign", "accountability", "criticism",
         "controversy", "mismanagement",
-        "bhrastachar", "andolan"
+        "bhrastachar", "andolan",
+        # Added for the Sept 2025 protests / Balen Shah government arc --
+        # sourced from actual reporting on the event, not guessed. "nepo
+        # kid(s)" was the movement's originating hashtag/phrase; both
+        # spaced and unspaced forms are included since hashtags usually
+        # drop the space ("#NepoKid"). "border encroachment" is the
+        # current controversy from PM Shah's first 100 days.
+        "nepo kid", "nepo kids", "nepokid", "nepokids",
+        "nepo baby", "nepobabies",
+        "border encroachment", "border dispute"
     ],
 
     "political_entities": [
         "rsp", "r.s.p", "rastriya swatantra party", "rabi lamichhane",
         "rabi", "balen", "balendra shah", "maoist", "uml",
-        "nepali congress", "congress", "nc"
+        "nepali congress", "congress", "nc",
+        # kp oli / kp sharma oli kept as full name fragments, not just
+        # "oli", to avoid matching unrelated common-surname mentions.
+        # Same reasoning for "sushila karki" over standalone "karki".
+        "kp oli", "kp sharma oli", "sushila karki"
     ],
 
     "political_events": [
         "gen z", "genz", "protest", "movement", "revolution", "corruption",
-        "social media ban", "government change"
+        "social media ban", "government change",
+        "wake up nepal", "curfew"
     ]
 }
 
@@ -453,7 +467,14 @@ def collect_posts(subreddits, max_posts=100, max_comments=20):
 
     run_input = {
         "startUrls": start_urls,
-        "maxItems": max_posts,
+        # maxItems caps the TOTAL dataset (posts + comments combined),
+        # separately from maxPostCount below. This used to be set equal
+        # to max_posts, which meant comments were eating the same budget
+        # posts needed -- a handful of heavily-commented posts could hit
+        # this cap before maxPostCount posts were ever collected, which
+        # is almost certainly why posts came back lower than accounts.
+        # Sized here so maxPostCount is always the real constraint.
+        "maxItems": max_posts * (max_comments + 1),
         "maxPostCount": max_posts,
         "maxComments": max_comments,
         "maxRequestRetries": 2,
@@ -496,6 +517,41 @@ def collect_posts(subreddits, max_posts=100, max_comments=20):
         logger.exception(f"Collection failed: {e}")
         return [], None
 
+
+
+def unprofiled_only(usernames):
+    """
+    Drop usernames that already have profile data in the accounts table.
+
+    The database stores only the anonymized account id by default, so the
+    plaintext username is hashed in memory and compared against accounts.id.
+    An account is considered profiled once accounts.created_utc is non-NULL.
+
+    This prevents repeated Apify profile-fetch calls for accounts whose
+    profile data has already been collected on an earlier run.
+    """
+    if not usernames:
+        return []
+
+    conn = get_conn()
+    try:
+        done = {
+            row["id"]
+            for row in conn.execute(
+                "SELECT id FROM accounts WHERE created_utc IS NOT NULL"
+            )
+        }
+    finally:
+        conn.close()
+
+    # Normalize exactly the same way save_items()/save_user_profiles() do:
+    # strip whitespace, lowercase, then anonymize.
+    return [
+        username
+        for username in usernames
+        if username
+        and anonymize(username.strip().lower()) not in done
+    ]
 
 
 def collect_user_profiles(usernames, batch_size=15, delay_between_batches=30):
@@ -575,66 +631,6 @@ def collect_user_profiles(usernames, batch_size=15, delay_between_batches=30):
 
     logger.info(f"Collected {len(all_items)} user profile items.")
     return all_items, last_dataset_id
-    """
-    Fetches account-level profile data (karma, account creation date) for
-    a list of RAW (non-anonymized) Reddit usernames, using the same actor
-    pointed at each user's profile URL. skipUserPosts=True keeps this
-    cheap and avoids re-collecting posts/comments already captured by
-    collect_posts().
-
-    Apify bills per result item ("pay per result"), so this adds roughly
-    one extra billed item per unique account on top of the posts/comments
-    run -- worth a small test batch (2-3 usernames) first to confirm the
-    actual number of billed results before running it on ~1,000 accounts.
-
-    usernames should be the RAW usernames still held in memory from this
-    same run (see __main__) -- never persisted to disk except via the
-    STORE_RAW_USERNAME debug flag.
-    """
-    if not usernames:
-        return [], None
-
-    all_items = []
-    last_dataset_id = None
-    client = get_client()
-
-    for i in range(0, len(usernames), batch_size):
-        batch = usernames[i:i + batch_size]
-        start_urls = [{"url": f"https://www.reddit.com/user/{u}/"} for u in batch]
-
-        run_input = {
-            "startUrls": start_urls,
-            "skipUserPosts": True,
-            "maxRequestRetries": 2,
-            "proxy": {"useApifyProxy": True}
-        }
-
-        logger.info(f"Fetching {len(batch)} user profiles...")
-
-        try:
-            run = client.actor(POSTS_ACTOR).call(
-                run_input=run_input,
-                run_timeout=timedelta(seconds=900)
-            )
-
-            if run is None:
-                logger.error("User-profile run returned no result.")
-                continue
-
-            if run.status != "SUCCEEDED":
-                logger.warning(f"User-profile run status={run.status!r}.")
-
-            dataset_id = run.default_dataset_id
-            last_dataset_id = dataset_id
-            items = list(client.dataset(dataset_id).iterate_items())
-            all_items.extend(items)
-
-        except Exception as e:
-            logger.exception(f"User-profile collection failed for batch at {i}: {e}")
-            continue
-
-    logger.info(f"Collected {len(all_items)} user profile items.")
-    return all_items, last_dataset_id
 
 
 #################################################
@@ -697,20 +693,6 @@ def save_items(items, subreddits=None, dataset_id=None):
 
             if data_type == "comment" and item.get("parentId"):
                 parent_map[fid] = item["parentId"]
-                
-        # ── TEMPORARY DEBUG — remove after checking ──────────────────────────────
-        debug_shown = 0
-        for item in items:
-            data_type = (item.get("dataType") or "").lower()
-            if data_type == "comment" and debug_shown < 5:
-                print(f"\n--- RAW COMMENT ITEM {debug_shown} ---")
-                print("id:", item.get("id"))
-                print("parentId:", item.get("parentId"))
-                print("linkId:", item.get("linkId"))
-                print("postId:", item.get("postId"))
-                print("All keys:", list(item.keys()))
-                debug_shown += 1
-# ──────────────────────────────────────────────────────────────────────────
 
         for item in items:
 
@@ -1118,8 +1100,8 @@ if __name__ == "__main__":
 
     # MAX_POSTS = 500
     # MAX_COMMENTS = 100
-    MAX_POSTS = 10
-    MAX_COMMENTS = 30
+    MAX_POSTS = 200
+    MAX_COMMENTS = 40
 
     logger.info("Starting Reddit collection...")
 
@@ -1139,10 +1121,22 @@ if __name__ == "__main__":
         # module docstring for why this doesn't touch the DB in plaintext.
         raw_usernames = stats.get("usernames", [])
         if raw_usernames:
-            profile_items, profile_dataset_id = collect_user_profiles(raw_usernames)
-            if profile_items:
-                profile_stats = save_user_profiles(profile_items)
-                logger.info(profile_stats)
+            # Only fetch profiles that have not already been profiled.
+            # This avoids re-billing Apify for accounts whose
+            # accounts.created_utc is already populated.
+            raw_usernames = unprofiled_only(raw_usernames)
+            logger.info(
+                f"Profile fetch candidates after DB check: "
+                f"{len(raw_usernames)}"
+            )
+
+            if raw_usernames:
+                profile_items, profile_dataset_id = collect_user_profiles(raw_usernames)
+                if profile_items:
+                    profile_stats = save_user_profiles(profile_items)
+                    logger.info(profile_stats)
+            else:
+                logger.info("All accounts in this batch already have profile data; skipping Apify profile fetch.")
     else:
         logger.warning("No data collected.")
 

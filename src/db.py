@@ -19,6 +19,23 @@ def get_conn():
     return conn
 
 
+def _migrate_schema(conn):
+    """
+    Idempotent migrations for columns added after a table's initial
+    CREATE TABLE. CREATE TABLE IF NOT EXISTS silently does nothing on a
+    DB that already has the table -- which is every existing local DB at
+    this point -- so a schema change like coordination_events.
+    target_post_id needs an explicit ALTER TABLE to actually land there.
+    Safe to call every time init_db() runs: only adds a missing column,
+    never touches an existing table's rows or any other table.
+    """
+    c = conn.cursor()
+    c.execute("PRAGMA table_info(coordination_events)")
+    existing_cols = {row[1] for row in c.fetchall()}
+    if 'target_post_id' not in existing_cols:
+        c.execute("ALTER TABLE coordination_events ADD COLUMN target_post_id TEXT")
+
+
 def init_db():
     conn = get_conn()
     c = conn.cursor()
@@ -253,6 +270,7 @@ def init_db():
         source_account_id   TEXT,
         target_account_id   TEXT,
         source_post_id      TEXT,
+        target_post_id      TEXT,
         event_type          TEXT,
         similarity          REAL,
         event_time          REAL,
@@ -397,6 +415,8 @@ def init_db():
     CREATE INDEX IF NOT EXISTS idx_event_time
         ON coordination_events(event_time);
     """)
+
+    _migrate_schema(conn)
 
     conn.commit()
     conn.close()

@@ -68,6 +68,13 @@ def initialize_database():
             platform             TEXT,
             is_bot               INTEGER DEFAULT -1,
 
+            -- Which Cresci-2017 source file this account came from (e.g.
+            -- 'social_spambots_1.csv', 'genuine_accounts.csv'). is_bot
+            -- alone only distinguishes bot vs human; this distinguishes
+            -- WHICH bot campaign, which is what per-campaign cluster
+            -- purity validation (proposal Ch. 5) actually needs.
+            source_dataset        TEXT DEFAULT 'unknown',
+
             -- Universal behavioral features
             posts_per_day        REAL DEFAULT 0.0,
             follower_ratio       REAL DEFAULT 0.0,
