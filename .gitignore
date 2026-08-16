@@ -21,7 +21,6 @@ ENV/
 !.env.example
 
 # Local databases and logs
-*.db
 *.sqlite
 *.sqlite3
 *.log
