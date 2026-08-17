@@ -1100,8 +1100,8 @@ if __name__ == "__main__":
 
     # MAX_POSTS = 500
     # MAX_COMMENTS = 100
-    MAX_POSTS = 200
-    MAX_COMMENTS = 40
+    MAX_POSTS = 20
+    MAX_COMMENTS = 10
 
     logger.info("Starting Reddit collection...")
 
