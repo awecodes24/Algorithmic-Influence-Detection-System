@@ -34,3 +34,4 @@ ENV/
 .idea/
 .DS_Store
 Thumbs.db
+.account_map.json
