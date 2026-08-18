@@ -26,8 +26,9 @@ ENV/
 *.log
 
 # Project data and generated outputs
-/data/
 /outputs/
+*/influence.db-shm
+*/influence.db-wal
 
 # Editor and OS files
 .vscode/

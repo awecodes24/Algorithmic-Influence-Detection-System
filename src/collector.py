@@ -159,9 +159,8 @@ except ModuleNotFoundError:
     from db import get_conn, init_db
 
 
-#################################################
+
 # CONFIG
-#################################################
 
 load_dotenv()
 
@@ -192,18 +191,17 @@ def get_client():
     return _client
 
 
-#################################################
+
 # HELPERS
-#################################################
 
 def anonymize(username: str) -> str:
     return hashlib.sha256(username.encode("utf-8")).hexdigest()[:16]
 
 
-#################################################
+
 # LOCAL ACCOUNT MAPPING (hashed_id -> raw_username)
-#################################################
-#
+
+
 # influence.db never stores a raw username -- accounts.username is
 # always NULL, so the shared research database stays genuinely
 # anonymized no matter who ends up looking at it (matches "anonymized"
@@ -519,23 +517,22 @@ def update_account_stats(cursor, account_id):
     )
 
 
-#################################################
+
 # TOPIC CLASSIFICATION
-#################################################
 
 
 # Historical keyword searches are intentionally broader than the classifier.
 # Keep this list reasonably small because each keyword x subreddit is an Apify run.
 HISTORICAL_SEARCH_TERMS = [
-    "nepo kid",
-    "nepokid",
-    "gen z",
-    "genz",
-    "social media ban",
-    "protest",
-    "movement",
-    "curfew",
-    "wake up nepal",
+    "government", "politics", "political", "election", "vote",
+    "corruption", "protest", "movement", "minister", "prime minister",
+    "president", "cabinet", "policy", "law", "bill", "budget",
+    "rabi lamichhane", "rabi", "balen", "balendra shah",
+    "kp oli", "kp sharma oli", "nepali congress", "congress",
+    "maoist", "uml", "gen z", "social media ban",
+    "sarkar", "pradhanmantri", "mantri", "rajniti", "rajnitik",
+    "chunab", "neta", "bhrastachar", "andolan", "nepokid",
+    "curfew", "wake up nepal",
 ]
 
 # NOTE: this is a keyword-only classifier -- fast, but it only ever catches
@@ -624,9 +621,8 @@ def classify_topic(text):
     return best_topic, float(best_score), 1
 
 
-#################################################
+
 # APIFY COLLECTION -- POSTS & COMMENTS
-#################################################
 
 def collect_historical_keyword_search(
     keyword,
@@ -918,26 +914,27 @@ def collect_known_account_history(
                     account_had_items = True
                 time.sleep(delay_seconds)
 
-            for sort in comment_sorts:
-                items, dataset_id = collect_account_history_comments(
-                    username=username,
-                    subreddit=subreddit,
-                    max_comments=comment_limit,
-                    sort=sort,
-                    time_filter=time_filter,
-                )
-                if items:
-                    stats = save_items(
-                        items,
-                        subreddits=[subreddit],
-                        dataset_id=dataset_id,
-                        collection_mode="historical_account_comments",
-                        search_keyword=f"author:{username}",
+            if comment_limit > 0:
+                for sort in comment_sorts:
+                    items, dataset_id = collect_account_history_comments(
+                        username=username,
+                        subreddit=subreddit,
+                        max_comments=comment_limit,
+                        sort=sort,
+                        time_filter=time_filter,
                     )
-                    totals["posts"] += stats["posts"]
-                    totals["comments"] += stats["comments"]
-                    account_had_items = True
-                time.sleep(delay_seconds)
+                    if items:
+                        stats = save_items(
+                            items,
+                            subreddits=[subreddit],
+                            dataset_id=dataset_id,
+                            collection_mode="historical_account_comments",
+                            search_keyword=f"author:{username}",
+                        )
+                        totals["posts"] += stats["posts"]
+                        totals["comments"] += stats["comments"]
+                        account_had_items = True
+                    time.sleep(delay_seconds)
 
         if account_had_items:
             totals["accounts"] += 1
@@ -1117,9 +1114,9 @@ def collect_user_profiles(usernames, batch_size=15, delay_between_batches=30):
     return all_items, last_dataset_id
 
 
-#################################################
+
 # DATABASE SAVE -- POSTS & COMMENTS
-#################################################
+
 
 def save_items(items, subreddits=None, dataset_id=None, collection_mode="recent", search_keyword=None):
     if not items:
@@ -1201,9 +1198,8 @@ def save_items(items, subreddits=None, dataset_id=None, collection_mode="recent"
             subreddit = normalize_subreddit(item)
             edited = extract_edited(item)
 
-            #################################################
+
             # POSTS
-            #################################################
 
             if data_type == "post":
 
@@ -1266,9 +1262,9 @@ def save_items(items, subreddits=None, dataset_id=None, collection_mode="recent"
                     if (post_count + comment_count) % 500 == 0:
                         conn.commit()
 
-            #################################################
+
             # COMMENTS
-            #################################################
+
 
             elif data_type == "comment":
 
@@ -1359,9 +1355,8 @@ def save_items(items, subreddits=None, dataset_id=None, collection_mode="recent"
                     if (post_count + comment_count) % 500 == 0:
                         conn.commit()
 
-        #################################################
+
         # UPDATE ACCOUNTS
-        #################################################
 
         for username in users:
             anon_id = anonymize(username)
@@ -1376,9 +1371,8 @@ def save_items(items, subreddits=None, dataset_id=None, collection_mode="recent"
 
             update_account_stats(c, anon_id)
 
-        #################################################
+        
         # DATASET METADATA
-        #################################################
 
         c.execute(
             """
@@ -1430,9 +1424,9 @@ def save_items(items, subreddits=None, dataset_id=None, collection_mode="recent"
     }
 
 
-#################################################
+
 # DATABASE SAVE -- USER PROFILES
-#################################################
+
 
 def save_user_profiles(items):
     """
@@ -1490,9 +1484,9 @@ def save_user_profiles(items):
     return {"profiles_updated": updated}
 
 
-#################################################
+
 # BACKFILL -- ENRICHMENT FOR ALREADY-COLLECTED ROWS
-#################################################
+
 
 def backfill_enrichment(batch_size=500):
     """
@@ -1550,9 +1544,9 @@ def backfill_enrichment(batch_size=500):
     return updated
 
 
-#################################################
+
 # PROGRESS REPORTING
-#################################################
+
 
 def report_progress(target_posts=5000, target_accounts=1000):
     """
@@ -1585,9 +1579,9 @@ def report_progress(target_posts=5000, target_accounts=1000):
     )
 
 
-#################################################
+
 # MAIN
-#################################################
+
 
 if __name__ == "__main__":
 
@@ -1634,7 +1628,7 @@ if __name__ == "__main__":
         help="Maximum number of stored accounts for account-history mode; 0 means all available usernames.",
     )
     parser.add_argument("--account-posts", type=int, default=100, help="Posts per account/subreddit/sort.")
-    parser.add_argument("--account-comments", type=int, default=100, help="Comments per account/subreddit/sort.")
+    parser.add_argument("--account-comments", type=int, default=0, help="Comments per account/subreddit/sort; 0 disables comment history.")
     parser.add_argument(
         "--account-post-sorts", nargs="+", default=["new", "top"],
         choices=("relevance", "hot", "top", "new", "rising", "comments"),
@@ -1666,8 +1660,10 @@ if __name__ == "__main__":
         parser.error("--historical-posts must be >= 1 and --historical-comments must be >= 0")
     if args.max_historical_jobs < 0 or args.account_limit < 0:
         parser.error("job/account limits cannot be negative")
-    if args.account_posts < 1 or args.account_comments < 1:
-        parser.error("--account-posts and --account-comments must be >= 1")
+    if args.account_posts < 1:
+        parser.error("--account-posts must be >= 1")
+    if args.account_comments < 0:
+        parser.error("--account-comments must be >= 0")
     if args.delay < 0:
         parser.error("--delay cannot be negative")
 
@@ -1680,11 +1676,13 @@ if __name__ == "__main__":
         sys.exit(0)
 
     SUBREDDITS = [
-    "Nepal",
-    "NepaliPolitics",
-    "nepalinews",
+        "Nepal",
+        "NepaliPolitics",
+        "nepalinews",
+        "NepalSocial",
+        "SouthAsia",
+        "Kathmandu",
     ]
-    
     HISTORICAL_KEYWORDS = args.keywords or HISTORICAL_SEARCH_TERMS
 
     logger.info("Starting Reddit collection: mode=%s", args.mode)
@@ -1721,9 +1719,8 @@ if __name__ == "__main__":
         totals["users"] += stats["users"]
         maybe_fetch_profiles(stats)
 
-    # -------------------------------------------------
+
     # RECENT MODE
-    # -------------------------------------------------
     if args.mode in ("recent", "both", "full"):
         items, dataset_id = collect_posts(
             subreddits=SUBREDDITS,
@@ -1732,9 +1729,8 @@ if __name__ == "__main__":
         )
         save_batch(items, dataset_id, "recent_new_feed", None, SUBREDDITS)
 
-    # -------------------------------------------------
+
     # HISTORICAL KEYWORD MODE
-    # -------------------------------------------------
     if args.mode in ("historical", "both", "full"):
         jobs = []
         seen = set()
@@ -1776,9 +1772,8 @@ if __name__ == "__main__":
                 [subreddit],
             )
 
-    # -------------------------------------------------
+
     # ACCOUNT-SPECIFIC HISTORICAL MODE
-    # -------------------------------------------------
     if args.mode in ("accounts", "full"):
         account_totals = collect_known_account_history(
             subreddits=SUBREDDITS,
