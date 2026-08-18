@@ -6,7 +6,15 @@ Compatible with the db.py schema.
 
 Required in .env:
     APIFY_API_TOKEN=...              (required)
-    STORE_RAW_USERNAME=false         (optional, default false -- see note below)
+
+Optional in .env:
+    ACCOUNT_MAP_PATH=...             (path to the local, git-ignored
+                                       hashed-id -> raw-username mapping
+                                       file account-history mode reads
+                                       from; defaults to .account_map.json
+                                       next to the repo root -- see the
+                                       "LOCAL ACCOUNT MAPPING" section
+                                       below for what this is and why)
 
 Changes from the original version, and why:
 
@@ -24,11 +32,28 @@ Changes from the original version, and why:
   match observed behavior once real debug output was checked.
 
 
-  * raw usernames are no longer written to the accounts table by default.
-    Previously `username` was stored in plaintext right next to the
-    SHA-256 `id` in the same row, which makes every account trivially
-    reversible for anyone with DB access -- not what "anonymized" in the
-    proposal (Sec 3.4.1) describes. See STORE_RAW_USERNAME below.
+  * raw usernames are NEVER written to the accounts table, full stop --
+    accounts.username is always NULL. There used to be a
+    STORE_RAW_USERNAME flag controlling this; it's been removed (see the
+    account-history fix below for why) rather than left as a setting
+    someone has to remember to leave on false. What's actually stored in
+    the shared research database now matches "anonymized" in the
+    proposal (Sec 3.4.1) unconditionally, with nothing to misconfigure.
+
+  * FIXED: account-history mode (--mode accounts) was silently a no-op
+    under the old STORE_RAW_USERNAME=false default. It read usernames
+    from accounts.username, which that same default always left NULL --
+    so get_stored_usernames() always returned an empty list, and
+    collect_known_account_history() always returned zero accounts
+    processed, with no error, just a warning log easy to miss in normal
+    output. Flipping the default to true would have "fixed" it by
+    contradicting the anonymization the rest of this file argues for.
+    Fixed properly instead: raw usernames are now also appended to a
+    separate, local-only, git-ignored mapping file
+    (see "LOCAL ACCOUNT MAPPING" below) every time save_items() sees one
+    -- automatically, not behind a flag -- and account-history mode reads
+    from that file instead of the database. The database stays
+    genuinely anonymized; account-history mode actually works.
 
   * collect_user_profiles() / save_user_profiles() are new: the original
     scrape never populated accounts.created_utc / comment_karma /
@@ -103,9 +128,11 @@ on the actor's Store page, not assumed field names):
 import os
 import re
 import sys
+import json
 import hashlib
 import logging
 import time
+import argparse
 from datetime import datetime, timezone, timedelta
 
 from dotenv import load_dotenv
@@ -141,13 +168,6 @@ load_dotenv()
 APIFY_TOKEN = os.getenv("APIFY_API_TOKEN")
 POSTS_ACTOR = "trudax/reddit-scraper-lite"
 
-# If True, the raw Reddit username is stored alongside the hashed account_id
-# in the accounts table, for local manual verification only. Default is
-# False so what's actually stored matches the "anonymized" language in the
-# proposal. NEVER enable this if influence.db (or any export/dashboard built
-# from it) will be shared, committed, or shown to anyone outside the team.
-STORE_RAW_USERNAME = os.getenv("STORE_RAW_USERNAME", "false").lower() == "true"
-
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s"
@@ -180,6 +200,135 @@ def anonymize(username: str) -> str:
     return hashlib.sha256(username.encode("utf-8")).hexdigest()[:16]
 
 
+#################################################
+# LOCAL ACCOUNT MAPPING (hashed_id -> raw_username)
+#################################################
+#
+# influence.db never stores a raw username -- accounts.username is
+# always NULL, so the shared research database stays genuinely
+# anonymized no matter who ends up looking at it (matches "anonymized"
+# in the proposal, Sec 3.4.1, without a flag to remember to leave off).
+#
+# Account-history mode (--mode accounts) still needs SOME way to know
+# which raw username a given hashed accounts.id came from, to run the
+# author:<username> search Reddit needs. That mapping lives here
+# instead: a local JSON file, never read by anything that touches the
+# database, never uploaded, never shown on the dashboard. Every raw
+# username this script ever sees gets appended to it automatically --
+# there's no separate flag to remember to turn on before it's useful.
+#
+# THIS FILE MUST NEVER BE COMMITTED, SHARED, OR SHOWN DURING A DEFENSE.
+# It's the one place a real Reddit username can be recovered from a
+# hashed account id. ACCOUNT_MAP_PATH below defaults next to the repo
+# root; _ensure_gitignored() adds a `.gitignore` entry for it the first
+# time this module runs, so a plain `git add .` can't accidentally
+# pick it up.
+
+ACCOUNT_MAP_PATH = os.getenv(
+    "ACCOUNT_MAP_PATH",
+    os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".account_map.json"),
+)
+
+
+def _ensure_gitignored(path):
+    """
+    Appends path's basename to a .gitignore next to it, if not already
+    present. Best-effort -- a missing/unwritable .gitignore is logged,
+    not fatal, since the mapping file itself is still created and used
+    correctly either way; this only prevents an accidental `git add .`
+    from picking it up.
+    """
+    gitignore_path = os.path.join(os.path.dirname(path), ".gitignore")
+    entry = os.path.basename(path)
+    try:
+        existing = ""
+        if os.path.exists(gitignore_path):
+            with open(gitignore_path, "r", encoding="utf-8") as f:
+                existing = f.read()
+        if entry not in existing.splitlines():
+            with open(gitignore_path, "a", encoding="utf-8") as f:
+                if existing and not existing.endswith("\n"):
+                    f.write("\n")
+                f.write(f"{entry}\n")
+    except OSError as exc:
+        logger.warning(
+            "Could not update .gitignore for %s (%s). Add it manually so "
+            "it's never committed.", entry, exc,
+        )
+
+
+def _load_account_map():
+    if not os.path.exists(ACCOUNT_MAP_PATH):
+        return {}
+    try:
+        with open(ACCOUNT_MAP_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning(
+            "Could not read %s (%s) -- treating as empty. If this file "
+            "has usernames you need, fix or restore it before running "
+            "account-history mode.", ACCOUNT_MAP_PATH, exc,
+        )
+        return {}
+
+
+def update_account_map(usernames):
+    """
+    Merges the given raw usernames into the local mapping file, keyed by
+    their anonymized id -- read-merge-write, so this is safe to call
+    every run without losing entries from earlier runs. Called
+    automatically from save_items() for every username it sees; you
+    should not need to call this directly.
+    """
+    if not usernames:
+        return
+
+    existing = _load_account_map()
+    added = 0
+    for username in usernames:
+        anon_id = anonymize(username)
+        if anon_id not in existing:
+            added += 1
+        existing[anon_id] = username
+
+    try:
+        os.makedirs(os.path.dirname(ACCOUNT_MAP_PATH) or ".", exist_ok=True)
+        tmp_path = ACCOUNT_MAP_PATH + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(existing, f, indent=2, sort_keys=True)
+        os.replace(tmp_path, ACCOUNT_MAP_PATH)  # atomic on POSIX -- a crash
+                                                  # mid-write can't corrupt
+                                                  # the real file
+        _ensure_gitignored(ACCOUNT_MAP_PATH)
+    except OSError as exc:
+        logger.warning(
+            "Could not write %s (%s). Account-history mode will not see "
+            "%d newly-seen username(s) from this run.",
+            ACCOUNT_MAP_PATH, exc, added,
+        )
+        return
+
+    if added:
+        logger.info(
+            "Local account map: %d new username(s) added (%s).",
+            added, ACCOUNT_MAP_PATH,
+        )
+
+
+def get_mapped_usernames(limit=0):
+    """
+    Returns raw usernames from the local account-mapping file --
+    account-history mode's actual source of usernames, replacing the
+    old accounts.username column read. Order is insertion order from
+    the JSON file (stable across runs, not database row order).
+    """
+    mapping = _load_account_map()
+    usernames = list(dict.fromkeys(mapping.values()))  # de-dup, preserve order
+    if limit and limit > 0:
+        usernames = usernames[:limit]
+    return usernames
+
+
 def get_content_hash(text: str):
     if not text:
         return None
@@ -188,24 +337,26 @@ def get_content_hash(text: str):
 
    
 def to_unix(value, context=""):
-    """
-    Converts an epoch number or ISO8601 string to a unix timestamp.
-    Falls back to "now" only when parsing truly fails, and logs it --
-    the original version failed silently, which could let a batch of bad
-    timestamps quietly corrupt every temporal feature (avg_post_interval,
-    hour_entropy, burstiness_score, ...) without leaving a trace.
+    """Convert an epoch number or ISO8601 timestamp to Unix seconds.
+
+    Missing/unparseable timestamps are represented as None rather than
+    fabricated with the current time. A fabricated timestamp would corrupt
+    temporal coordination features.
     """
     if value is None:
-        return datetime.now(timezone.utc).timestamp()
+        return None
 
     if isinstance(value, (int, float)):
         return float(value)
 
     try:
         return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
-    except Exception:
-        logger.warning(f"Could not parse timestamp {value!r} ({context}); using now()")
-        return datetime.now(timezone.utc).timestamp()
+    except (TypeError, ValueError, OverflowError) as exc:
+        logger.warning(
+            "Could not parse timestamp %r (%s): %s; storing NULL.",
+            value, context, exc,
+        )
+        return None
 
 
 _DEVANAGARI_RE = re.compile(r"[\u0900-\u097F]")
@@ -372,6 +523,21 @@ def update_account_stats(cursor, account_id):
 # TOPIC CLASSIFICATION
 #################################################
 
+
+# Historical keyword searches are intentionally broader than the classifier.
+# Keep this list reasonably small because each keyword x subreddit is an Apify run.
+HISTORICAL_SEARCH_TERMS = [
+    "nepo kid",
+    "nepokid",
+    "gen z",
+    "genz",
+    "social media ban",
+    "protest",
+    "movement",
+    "curfew",
+    "wake up nepal",
+]
+
 # NOTE: this is a keyword-only classifier -- fast, but it only ever catches
 # what's in these lists. A handful of common Romanized Nepali political
 # terms are seeded below as a starting point (sarkar/government,
@@ -461,6 +627,322 @@ def classify_topic(text):
 #################################################
 # APIFY COLLECTION -- POSTS & COMMENTS
 #################################################
+
+def collect_historical_keyword_search(
+    keyword,
+    subreddit=None,
+    max_posts=100,
+    max_comments=10,
+    sort="top",
+    time_filter="all",
+):
+    """
+    Search Reddit for older posts matching one keyword.
+
+    The current actor supports keyword search through ``searches`` and can
+    restrict that search to a subreddit with ``searchCommunityName``.
+    ``time=all`` is deliberately used here instead of /new/, and ``top`` is
+    the default sort because it tends to surface older, established matches.
+
+    Important limitation: Reddit search is not an exhaustive historical archive.
+    Different keywords and sort modes can return overlapping results, so the
+    database must remain duplicate-safe.
+    """
+    if not keyword or not keyword.strip():
+        raise ValueError("keyword must not be empty")
+
+    if sort not in ("relevance", "hot", "top", "new", "rising", "comments", ""):
+        raise ValueError(f"Unsupported search sort: {sort!r}")
+
+    if time_filter not in ("all", "hour", "day", "week", "month", "year"):
+        raise ValueError(f"Unsupported time filter: {time_filter!r}")
+
+    run_input = {
+        "searches": [keyword.strip()],
+        "searchPosts": True,
+        "searchComments": False,
+        "searchCommunities": False,
+        "searchUsers": False,
+        "sort": sort,
+        "time": time_filter,
+        "maxItems": max_posts * (max_comments + 1),
+        "maxPostCount": max_posts,
+        "maxComments": max_comments,
+        "includeMediaLinks": True,
+        "maxRequestRetries": 2,
+        "proxy": {"useApifyProxy": True},
+    }
+
+    if subreddit:
+        run_input["searchCommunityName"] = subreddit.strip().lstrip("r/")
+
+    logger.info(
+        "Historical search: keyword=%r subreddit=%r sort=%s time=%s posts=%s comments=%s",
+        keyword, subreddit, sort or "default", time_filter, max_posts, max_comments,
+    )
+
+    client = get_client()
+    try:
+        run = client.actor(POSTS_ACTOR).call(
+            run_input=run_input,
+            run_timeout=timedelta(seconds=1800),
+        )
+
+        if run is None:
+            logger.error("Historical search actor returned no result.")
+            return [], None
+
+        if run.status != "SUCCEEDED":
+            logger.warning(
+                "Historical search finished with status=%r; dataset may be incomplete.",
+                run.status,
+            )
+
+        dataset_id = run.default_dataset_id
+        items = list(client.dataset(dataset_id).iterate_items())
+        logger.info(
+            "Historical search returned %d items (run status: %s).",
+            len(items), run.status,
+        )
+        return items, dataset_id
+
+    except KeyboardInterrupt:
+        logger.warning("Historical search interrupted.")
+        return [], None
+    except Exception as e:
+        logger.exception("Historical search failed for %r: %s", keyword, e)
+        return [], None
+
+
+def build_historical_jobs(subreddits, keywords, sort="top"):
+    """Create deterministic subreddit x keyword jobs for this single-laptop run."""
+    jobs = []
+    seen = set()
+    for subreddit in subreddits:
+        clean_subreddit = subreddit.strip().lstrip("r/").lower()
+        if not clean_subreddit:
+            continue
+        for keyword in keywords:
+            clean_keyword = re.sub(r"\s+", " ", keyword.strip().lower())
+            key = (clean_subreddit, clean_keyword, sort)
+            if clean_keyword and key not in seen:
+                seen.add(key)
+                jobs.append({
+                    "subreddit": clean_subreddit,
+                    "keyword": clean_keyword,
+                    "sort": sort,
+                })
+    return jobs
+
+
+
+def _run_actor(run_input, label, timeout_seconds=1800):
+    """Run the Apify actor and return (items, dataset_id), never raising for a normal run failure."""
+    client = get_client()
+    try:
+        run = client.actor(POSTS_ACTOR).call(
+            run_input=run_input,
+            run_timeout=timedelta(seconds=timeout_seconds),
+        )
+        if run is None:
+            logger.error("%s: actor returned no run result.", label)
+            return [], None
+
+        dataset_id = getattr(run, "default_dataset_id", None)
+        if not dataset_id:
+            logger.error("%s: actor returned no dataset id (status=%r).", label, run.status)
+            return [], None
+
+        if run.status != "SUCCEEDED":
+            logger.warning(
+                "%s: actor finished with status=%r; dataset may be incomplete.",
+                label, run.status,
+            )
+
+        items = list(client.dataset(dataset_id).iterate_items())
+        logger.info("%s: received %d items (status=%s).", label, len(items), run.status)
+        return items, dataset_id
+    except KeyboardInterrupt:
+        logger.warning("%s: interrupted by user.", label)
+        return [], None
+    except Exception as exc:
+        logger.exception("%s: actor call failed: %s", label, exc)
+        return [], None
+
+
+def _validate_limit(name, value, allow_zero=False):
+    minimum = 0 if allow_zero else 1
+    if value < minimum:
+        raise ValueError(f"{name} must be >= {minimum}")
+
+
+def collect_account_history_posts(
+    username,
+    subreddit=None,
+    max_posts=100,
+    sort="top",
+    time_filter="all",
+):
+    """Collect posts previously submitted by one account.
+
+    Uses Reddit's documented author search syntax (author:<username>) and can
+    optionally restrict the search to one project subreddit.
+    """
+    username = (username or "").strip().lstrip("u/")
+    if not username or username.lower() in ("[deleted]", "[removed]"):
+        return [], None
+    if sort not in ("relevance", "hot", "top", "new", "rising", "comments"):
+        raise ValueError(f"Unsupported account-history post sort: {sort!r}")
+    if time_filter not in ("all", "hour", "day", "week", "month", "year"):
+        raise ValueError(f"Unsupported time filter: {time_filter!r}")
+    _validate_limit("max_posts", max_posts)
+
+    run_input = {
+        "searches": [f"author:{username}"],
+        "searchPosts": True,
+        "searchComments": False,
+        "searchCommunities": False,
+        "searchUsers": False,
+        "sort": sort,
+        "time": time_filter,
+        "maxItems": max_posts,
+        "maxPostCount": max_posts,
+        "maxComments": 0,
+        "includeMediaLinks": True,
+        "maxRequestRetries": 3,
+        "proxy": {"useApifyProxy": True},
+    }
+    if subreddit:
+        run_input["searchCommunityName"] = subreddit.strip().lstrip("r/")
+
+    label = f"Account posts: u/{username}" + (f" in r/{subreddit}" if subreddit else "")
+    logger.info("%s | sort=%s time=%s max_posts=%s", label, sort, time_filter, max_posts)
+    return _run_actor(run_input, label)
+
+
+def collect_account_history_comments(
+    username,
+    subreddit=None,
+    max_comments=100,
+    sort="new",
+    time_filter="all",
+):
+    """Collect comments previously written by one account."""
+    username = (username or "").strip().lstrip("u/")
+    if not username or username.lower() in ("[deleted]", "[removed]"):
+        return [], None
+    if sort not in ("relevance", "hot", "top", "new", "rising", "comments"):
+        raise ValueError(f"Unsupported account-history comment sort: {sort!r}")
+    if time_filter not in ("all", "hour", "day", "week", "month", "year"):
+        raise ValueError(f"Unsupported time filter: {time_filter!r}")
+    _validate_limit("max_comments", max_comments)
+
+    run_input = {
+        "searches": [f"author:{username}"],
+        "searchPosts": False,
+        "searchComments": True,
+        "searchCommunities": False,
+        "searchUsers": False,
+        "sort": sort,
+        "time": time_filter,
+        "maxItems": max_comments,
+        "maxPostCount": 0,
+        "maxComments": max_comments,
+        "includeMediaLinks": True,
+        "maxRequestRetries": 3,
+        "proxy": {"useApifyProxy": True},
+    }
+    if subreddit:
+        run_input["searchCommunityName"] = subreddit.strip().lstrip("r/")
+
+    label = f"Account comments: u/{username}" + (f" in r/{subreddit}" if subreddit else "")
+    logger.info("%s | sort=%s time=%s max_comments=%s", label, sort, time_filter, max_comments)
+    return _run_actor(run_input, label)
+
+
+def collect_known_account_history(
+    subreddits,
+    max_accounts=0,
+    post_limit=100,
+    comment_limit=100,
+    post_sorts=("new", "top"),
+    comment_sorts=("new", "top"),
+    time_filter="all",
+    delay_seconds=2,
+):
+    """
+    Collect historical posts/comments for usernames in the local
+    account-mapping file (see "LOCAL ACCOUNT MAPPING" near anonymize(),
+    above) -- populated automatically by save_items() every time this
+    script runs in any other mode, so a normal recent/historical run
+    first, then --mode accounts, has usernames to work with without any
+    extra setup step.
+    """
+    usernames = get_mapped_usernames(limit=max_accounts)
+    if not usernames:
+        logger.warning(
+            "Account-history mode found no usernames in %s. Run "
+            "collection in another mode first (recent/historical) so "
+            "save_items() has usernames to record, then try --mode "
+            "accounts again.",
+            ACCOUNT_MAP_PATH,
+        )
+        return {"posts": 0, "comments": 0, "accounts": 0, "usernames": 0}
+
+    logger.info("Account-history mode: %d username(s) available.", len(usernames))
+    totals = {"posts": 0, "comments": 0, "accounts": 0, "usernames": len(usernames)}
+
+    for account_index, username in enumerate(usernames, start=1):
+        logger.info("Account history %d/%d: u/%s", account_index, len(usernames), username)
+        account_had_items = False
+
+        for subreddit in subreddits:
+            for sort in post_sorts:
+                items, dataset_id = collect_account_history_posts(
+                    username=username,
+                    subreddit=subreddit,
+                    max_posts=post_limit,
+                    sort=sort,
+                    time_filter=time_filter,
+                )
+                if items:
+                    stats = save_items(
+                        items,
+                        subreddits=[subreddit],
+                        dataset_id=dataset_id,
+                        collection_mode="historical_account_posts",
+                        search_keyword=f"author:{username}",
+                    )
+                    totals["posts"] += stats["posts"]
+                    totals["comments"] += stats["comments"]
+                    account_had_items = True
+                time.sleep(delay_seconds)
+
+            for sort in comment_sorts:
+                items, dataset_id = collect_account_history_comments(
+                    username=username,
+                    subreddit=subreddit,
+                    max_comments=comment_limit,
+                    sort=sort,
+                    time_filter=time_filter,
+                )
+                if items:
+                    stats = save_items(
+                        items,
+                        subreddits=[subreddit],
+                        dataset_id=dataset_id,
+                        collection_mode="historical_account_comments",
+                        search_keyword=f"author:{username}",
+                    )
+                    totals["posts"] += stats["posts"]
+                    totals["comments"] += stats["comments"]
+                    account_had_items = True
+                time.sleep(delay_seconds)
+
+        if account_had_items:
+            totals["accounts"] += 1
+
+    return totals
 
 def collect_posts(subreddits, max_posts=100, max_comments=20):
     start_urls = [{"url": f"https://www.reddit.com/r/{s}/new/"} for s in subreddits]
@@ -575,8 +1057,10 @@ def collect_user_profiles(usernames, batch_size=15, delay_between_batches=30):
     actual number of billed results before running it on ~1,000 accounts.
 
     usernames should be the RAW usernames still held in memory from this
-    same run (see __main__) -- never persisted to disk except via the
-    STORE_RAW_USERNAME debug flag.
+    same run (see __main__). save_items() already writes these to the
+    local account-mapping file (see "LOCAL ACCOUNT MAPPING" near
+    anonymize()) before this function is ever called -- influence.db
+    itself still never sees them; only that local file does.
     """
     if not usernames:
         return [], None
@@ -637,7 +1121,7 @@ def collect_user_profiles(usernames, batch_size=15, delay_between_batches=30):
 # DATABASE SAVE -- POSTS & COMMENTS
 #################################################
 
-def save_items(items, subreddits=None, dataset_id=None):
+def save_items(items, subreddits=None, dataset_id=None, collection_mode="recent", search_keyword=None):
     if not items:
         logger.warning("No items to save.")
         return {"posts": 0, "comments": 0, "users": 0, "usernames": []}
@@ -797,7 +1281,24 @@ def save_items(items, subreddits=None, dataset_id=None):
                 # deliberate trade-off worth noting in your methodology.
                 # Resolved via author_map (built above), comparing
                 # anonymized ids -- see module docstring.
-                if parent_id and author_map.get(parent_id) == anon_id:
+                # FIXED: parent_id arrives prefixed ('t3_abc123' for a
+                # post parent, 't1_xyz' for a comment parent), but
+                # author_map is keyed by BARE ids ('abc123') everywhere
+                # it's built above (from posts.id/comments.id, and from
+                # item.get("id") in the pre-pass) -- so
+                # author_map.get(parent_id) was always looking up a
+                # "t3_..."/"t1_..." string that never matched any key,
+                # always returned None, and this check silently never
+                # skipped a single self-reply for any real item.
+                # Confirmed by testing with realistic prefixed sample
+                # data during this rewrite. Strip the two-char type
+                # prefix + "_" before the lookup so it actually matches.
+                parent_bare_id = (
+                    parent_id.split("_", 1)[1]
+                    if parent_id and "_" in parent_id
+                    else parent_id
+                )
+                if parent_bare_id and author_map.get(parent_bare_id) == anon_id:
                     continue
 
                 body = item.get("body", "").strip()
@@ -870,7 +1371,7 @@ def save_items(items, subreddits=None, dataset_id=None):
                 INSERT OR IGNORE INTO accounts (id, username)
                 VALUES (?,?)
                 """,
-                (anon_id, username if STORE_RAW_USERNAME else None)
+                (anon_id, None)
             )
 
             update_account_stats(c, anon_id)
@@ -891,7 +1392,8 @@ def save_items(items, subreddits=None, dataset_id=None):
                 post_count,
                 comment_count,
                 len(users),
-                f"Actor={POSTS_ACTOR};Mode=posts_comments;Dataset={dataset_id or 'unknown'}"
+                f"Actor={POSTS_ACTOR};Mode={collection_mode};"
+                f"Keyword={search_keyword or '-'};Dataset={dataset_id or 'unknown'}"
             )
         )
 
@@ -909,13 +1411,21 @@ def save_items(items, subreddits=None, dataset_id=None):
     logger.info(f"Unique users: {len(users)}")
     logger.info(f"Total records: {post_count + comment_count}")
 
+    # Every raw username this run saw goes into the local account-map
+    # file (see "LOCAL ACCOUNT MAPPING" near anonymize(), above) --
+    # unconditionally, so account-history mode has something to work
+    # with without a separate flag to remember. The database itself
+    # never sees these; only ACCOUNT_MAP_PATH does.
+    update_account_map(sorted(users))
+
     return {
         "posts": post_count,
         "comments": comment_count,
         "users": len(users),
-        # Raw usernames, kept only in memory for this run, so
-        # collect_user_profiles() can be called without ever reading a
-        # plaintext username back out of the database.
+        # Raw usernames from this run, for collect_user_profiles() /
+        # unprofiled_only() below to use immediately without a second
+        # disk read -- update_account_map() above already persisted
+        # them, this is just handing the same list onward in memory.
         "usernames": sorted(users)
     }
 
@@ -1081,64 +1591,209 @@ def report_progress(target_posts=5000, target_accounts=1000):
 
 if __name__ == "__main__":
 
+    parser = argparse.ArgumentParser(
+        description="Collect public Reddit data for the coordination-analysis project."
+    )
+    parser.add_argument(
+        "--mode",
+        choices=("recent", "historical", "accounts", "both", "full"),
+        default="historical",
+        help=(
+            "recent=/new/ feed; historical=keyword history; "
+            "accounts=history of usernames seen in earlier runs (read from "
+            "the local account-mapping file, not the database -- see "
+            "ACCOUNT_MAP_PATH); both=recent+keyword; "
+            "full=recent+keyword+account history."
+        ),
+    )
+    parser.add_argument("--backfill", action="store_true", help="Recompute topic/language/sentiment without Apify calls.")
+    parser.add_argument("--recent-posts", type=int, default=100)
+    parser.add_argument("--recent-comments", type=int, default=10)
+    parser.add_argument("--historical-posts", type=int, default=100)
+    parser.add_argument("--historical-comments", type=int, default=10)
+    parser.add_argument(
+        "--historical-sorts", nargs="+", default=["top"],
+        choices=("relevance", "hot", "top", "new", "rising", "comments"),
+        help="One or more search sorts for keyword history. Repeated sorts can uncover different results.",
+    )
+    parser.add_argument(
+        "--historical-time", default="all",
+        choices=("all", "hour", "day", "week", "month", "year"),
+        help="Reddit search time filter for keyword history.",
+    )
+    parser.add_argument(
+        "--max-historical-jobs", type=int, default=0,
+        help="Maximum keyword-search jobs; 0 means all jobs.",
+    )
+    parser.add_argument(
+        "--keyword", action="append", dest="keywords",
+        help="Override the default historical keyword list. Repeat this option.",
+    )
+    parser.add_argument(
+        "--account-limit", type=int, default=0,
+        help="Maximum number of stored accounts for account-history mode; 0 means all available usernames.",
+    )
+    parser.add_argument("--account-posts", type=int, default=100, help="Posts per account/subreddit/sort.")
+    parser.add_argument("--account-comments", type=int, default=100, help="Comments per account/subreddit/sort.")
+    parser.add_argument(
+        "--account-post-sorts", nargs="+", default=["new", "top"],
+        choices=("relevance", "hot", "top", "new", "rising", "comments"),
+        help="Sorts used for account post history.",
+    )
+    parser.add_argument(
+        "--account-comment-sorts", nargs="+", default=["new", "top"],
+        choices=("relevance", "hot", "top", "new", "rising", "comments"),
+        help="Sorts used for account comment history.",
+    )
+    parser.add_argument(
+        "--account-time", default="all",
+        choices=("all", "hour", "day", "week", "month", "year"),
+        help="Reddit search time filter for account history.",
+    )
+    parser.add_argument(
+        "--delay", type=float, default=2.0,
+        help="Delay between account-history actor calls in seconds.",
+    )
+    parser.add_argument(
+        "--no-profiles", action="store_true",
+        help="Do not fetch missing account profile metadata after collection.",
+    )
+    args = parser.parse_args()
+
+    if args.recent_posts < 1 or args.recent_comments < 0:
+        parser.error("--recent-posts must be >= 1 and --recent-comments must be >= 0")
+    if args.historical_posts < 1 or args.historical_comments < 0:
+        parser.error("--historical-posts must be >= 1 and --historical-comments must be >= 0")
+    if args.max_historical_jobs < 0 or args.account_limit < 0:
+        parser.error("job/account limits cannot be negative")
+    if args.account_posts < 1 or args.account_comments < 1:
+        parser.error("--account-posts and --account-comments must be >= 1")
+    if args.delay < 0:
+        parser.error("--delay cannot be negative")
+
     init_db()
 
-    if "--backfill" in sys.argv:
+    if args.backfill:
         logger.info("Running enrichment backfill on existing rows (no Apify calls)...")
         backfill_enrichment()
         report_progress()
         sys.exit(0)
 
     SUBREDDITS = [
-        "Nepal",
-        "NepaliPolitics",
-        "nepalinews",
-        "NepalSocial",
-        "SouthAsia",
-        "Kathmandu"
+    "Nepal",
+    "NepaliPolitics",
+    "nepalinews",
     ]
+    
+    HISTORICAL_KEYWORDS = args.keywords or HISTORICAL_SEARCH_TERMS
 
-    # MAX_POSTS = 500
-    # MAX_COMMENTS = 100
-    MAX_POSTS = 20
-    MAX_COMMENTS = 10
+    logger.info("Starting Reddit collection: mode=%s", args.mode)
+    logger.info("Target subreddits: %s", ", ".join(SUBREDDITS))
 
-    logger.info("Starting Reddit collection...")
+    totals = {"posts": 0, "comments": 0, "users": 0}
 
-    items, dataset_id = collect_posts(
-        subreddits=SUBREDDITS,
-        max_posts=MAX_POSTS,
-        max_comments=MAX_COMMENTS
-    )
-
-    if items:
-        stats = save_items(items, SUBREDDITS, dataset_id)
-        logger.info({k: v for k, v in stats.items() if k != "usernames"})
-
-        # Backfill account-level profile data (karma, account age) for
-        # every username seen in this batch, while the raw usernames are
-        # still in memory -- see save_items()'s "usernames" and the
-        # module docstring for why this doesn't touch the DB in plaintext.
+    def maybe_fetch_profiles(stats):
+        if args.no_profiles:
+            return
         raw_usernames = stats.get("usernames", [])
-        if raw_usernames:
-            # Only fetch profiles that have not already been profiled.
-            # This avoids re-billing Apify for accounts whose
-            # accounts.created_utc is already populated.
-            raw_usernames = unprofiled_only(raw_usernames)
+        if not raw_usernames:
+            return
+        raw_usernames = unprofiled_only(raw_usernames)
+        if not raw_usernames:
+            return
+        logger.info("Fetching profile metadata for %d newly observed account(s).", len(raw_usernames))
+        profile_items, _ = collect_user_profiles(raw_usernames)
+        if profile_items:
+            logger.info("%s", save_user_profiles(profile_items))
+
+    def save_batch(items, dataset_id, mode, keyword, subreddits):
+        if not items:
+            return
+        stats = save_items(
+            items,
+            subreddits=subreddits,
+            dataset_id=dataset_id,
+            collection_mode=mode,
+            search_keyword=keyword,
+        )
+        totals["posts"] += stats["posts"]
+        totals["comments"] += stats["comments"]
+        totals["users"] += stats["users"]
+        maybe_fetch_profiles(stats)
+
+    # -------------------------------------------------
+    # RECENT MODE
+    # -------------------------------------------------
+    if args.mode in ("recent", "both", "full"):
+        items, dataset_id = collect_posts(
+            subreddits=SUBREDDITS,
+            max_posts=args.recent_posts,
+            max_comments=args.recent_comments,
+        )
+        save_batch(items, dataset_id, "recent_new_feed", None, SUBREDDITS)
+
+    # -------------------------------------------------
+    # HISTORICAL KEYWORD MODE
+    # -------------------------------------------------
+    if args.mode in ("historical", "both", "full"):
+        jobs = []
+        seen = set()
+        for subreddit in SUBREDDITS:
+            for keyword in HISTORICAL_KEYWORDS:
+                keyword_clean = re.sub(r"\s+", " ", keyword.strip().lower())
+                if not keyword_clean:
+                    continue
+                for sort in args.historical_sorts:
+                    key = (subreddit.lower(), keyword_clean, sort)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    jobs.append((subreddit, keyword_clean, sort))
+
+        if args.max_historical_jobs > 0:
+            jobs = jobs[:args.max_historical_jobs]
+
+        logger.info("Historical keyword jobs to run: %d", len(jobs))
+
+        for index, (subreddit, keyword, sort) in enumerate(jobs, start=1):
             logger.info(
-                f"Profile fetch candidates after DB check: "
-                f"{len(raw_usernames)}"
+                "Historical keyword job %d/%d: r/%s | %r | sort=%s | time=%s",
+                index, len(jobs), subreddit, keyword, sort, args.historical_time,
+            )
+            items, dataset_id = collect_historical_keyword_search(
+                keyword=keyword,
+                subreddit=subreddit,
+                max_posts=args.historical_posts,
+                max_comments=args.historical_comments,
+                sort=sort,
+                time_filter=args.historical_time,
+            )
+            save_batch(
+                items,
+                dataset_id,
+                "historical_keyword",
+                keyword,
+                [subreddit],
             )
 
-            if raw_usernames:
-                profile_items, profile_dataset_id = collect_user_profiles(raw_usernames)
-                if profile_items:
-                    profile_stats = save_user_profiles(profile_items)
-                    logger.info(profile_stats)
-            else:
-                logger.info("All accounts in this batch already have profile data; skipping Apify profile fetch.")
-    else:
-        logger.warning("No data collected.")
+    # -------------------------------------------------
+    # ACCOUNT-SPECIFIC HISTORICAL MODE
+    # -------------------------------------------------
+    if args.mode in ("accounts", "full"):
+        account_totals = collect_known_account_history(
+            subreddits=SUBREDDITS,
+            max_accounts=args.account_limit,
+            post_limit=args.account_posts,
+            comment_limit=args.account_comments,
+            post_sorts=tuple(dict.fromkeys(args.account_post_sorts)),
+            comment_sorts=tuple(dict.fromkeys(args.account_comment_sorts)),
+            time_filter=args.account_time,
+            delay_seconds=args.delay,
+        )
+        logger.info("Account-history totals: %s", account_totals)
 
     report_progress()
-    logger.info("Collection completed successfully.")
+    logger.info(
+        "Collection completed. Newly inserted records this process: posts=%d, comments=%d, users_seen=%d",
+        totals["posts"], totals["comments"], totals["users"],
+    )
