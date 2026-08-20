@@ -166,6 +166,7 @@ load_dotenv()
 
 APIFY_TOKEN = os.getenv("APIFY_API_TOKEN")
 POSTS_ACTOR = "trudax/reddit-scraper-lite"
+HISTORICAL_ACTOR = "harshmaur/reddit-scraper"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -524,15 +525,16 @@ def update_account_stats(cursor, account_id):
 # Historical keyword searches are intentionally broader than the classifier.
 # Keep this list reasonably small because each keyword x subreddit is an Apify run.
 HISTORICAL_SEARCH_TERMS = [
-    "government", "politics", "political", "election", "vote",
-    "corruption", "protest", "movement", "minister", "prime minister",
-    "president", "cabinet", "policy", "law", "bill", "budget",
-    "rabi lamichhane", "rabi", "balen", "balendra shah",
-    "kp oli", "kp sharma oli", "nepali congress", "congress",
-    "maoist", "uml", "gen z", "social media ban",
-    "sarkar", "pradhanmantri", "mantri", "rajniti", "rajnitik",
-    "chunab", "neta", "bhrastachar", "andolan", "nepokid",
-    "curfew", "wake up nepal",
+    "gen z",
+    "genz",
+    "gen z protest",
+    "youth protest",
+    "protest",
+    "nepo kid",
+    "nepokid",
+    "social media ban",
+    "government response",
+    "curfew",
 ]
 
 # NOTE: this is a keyword-only classifier -- fast, but it only ever catches
@@ -624,89 +626,161 @@ def classify_topic(text):
 
 # APIFY COLLECTION -- POSTS & COMMENTS
 
+def _validate_date_range(start_date=None, end_date=None):
+    """Validate YYYY-MM-DD dates and ensure start <= end."""
+    parsed_start = parsed_end = None
+    for label, value in (("start-date", start_date), ("end-date", end_date)):
+        if value is None:
+            continue
+        try:
+            parsed = datetime.strptime(value, "%Y-%m-%d").date()
+        except ValueError as exc:
+            raise ValueError(f"{label} must use YYYY-MM-DD (got {value!r})") from exc
+        if label == "start-date":
+            parsed_start = parsed
+        else:
+            parsed_end = parsed
+    if parsed_start and parsed_end and parsed_start > parsed_end:
+        raise ValueError("start-date cannot be after end-date")
+    return parsed_start, parsed_end
+
+
+def _normalize_historical_post(item, subreddit_hint=None):
+    """Normalize harshmaur/reddit-scraper post output to this project's schema shape."""
+    if not isinstance(item, dict):
+        return None
+
+    # The actor's post output uses authorName/communityName/title/body/
+    # postUrl/createdAt/upVotes/commentsCount. Keep a few fallbacks so a
+    # minor actor output rename does not silently drop a whole run.
+    post_id = item.get("id") or item.get("postId") or item.get("name")
+    if not post_id:
+        return None
+    if isinstance(post_id, str) and post_id.startswith("t3_"):
+        post_id = post_id[3:]
+
+    username = item.get("authorName") or item.get("username") or item.get("author")
+    if not username or str(username).lower() in ("[deleted]", "[removed]"):
+        return None
+
+    body = item.get("body")
+    if body is None:
+        body = item.get("content") or item.get("text") or ""
+    title = item.get("title") or ""
+    text = f"{title} {body}".strip()
+    if not text or text.lower() in ("[deleted]", "[removed]"):
+        return None
+
+    community = (
+        item.get("communityName")
+        or item.get("subredditName")
+        or item.get("parsedCommunity")
+        or subreddit_hint
+        or ""
+    )
+    community = re.sub(r"^r/", "", str(community).strip(), flags=re.IGNORECASE).lower()
+
+    return {
+        "id": post_id,
+        "dataType": "post",
+        "username": str(username).strip().lower(),
+        "parsedCommunityName": community,
+        "title": title,
+        "body": body or "",
+        "createdAt": item.get("createdAt") or item.get("created_at") or item.get("createdTime"),
+        "upVotes": item.get("upVotes", item.get("score", 0)) or 0,
+        "numberOfComments": item.get("commentsCount", item.get("numberOfComments", 0)) or 0,
+        "url": item.get("postUrl", item.get("url", "")) or "",
+        "edited": item.get("edited", item.get("isEdited", False)),
+    }
+
+
 def collect_historical_keyword_search(
     keyword,
     subreddit=None,
     max_posts=100,
-    max_comments=10,
+    max_comments=0,
     sort="top",
     time_filter="all",
+    start_date=None,
+    end_date=None,
 ):
-    """
-    Search Reddit for older posts matching one keyword.
+    """Collect topic posts from an exact historical date window.
 
-    The current actor supports keyword search through ``searches`` and can
-    restrict that search to a subreddit with ``searchCommunityName``.
-    ``time=all`` is deliberately used here instead of /new/, and ``top`` is
-    the default sort because it tends to surface older, established matches.
-
-    Important limitation: Reddit search is not an exhaustive historical archive.
-    Different keywords and sort modes can return overlapping results, so the
-    database must remain duplicate-safe.
+    The historical collector uses harshmaur/reddit-scraper because it natively
+    supports postedAfter/postedBefore for keyword searches. Plain end dates
+    cover the full UTC day. The actor also limits each listing to roughly
+    1,000 reachable Reddit results, so narrow keywords/date windows are still
+    preferable for historical research.
     """
     if not keyword or not keyword.strip():
         raise ValueError("keyword must not be empty")
-
-    if sort not in ("relevance", "hot", "top", "new", "rising", "comments", ""):
+    if sort not in ("relevance", "hot", "top", "new", "comments"):
         raise ValueError(f"Unsupported search sort: {sort!r}")
+    _validate_date_range(start_date, end_date)
+    _validate_limit("max_posts", max_posts)
+    if max_comments != 0:
+        logger.warning("Historical comment collection is disabled in this focused collector; forcing 0 comments.")
 
-    if time_filter not in ("all", "hour", "day", "week", "month", "year"):
-        raise ValueError(f"Unsupported time filter: {time_filter!r}")
-
+    # The actor switches to chronological/newest-first when absolute date
+    # bounds are supplied, so Reddit's relative searchTime is intentionally
+    # omitted in that case.
     run_input = {
-        "searches": [keyword.strip()],
+        "searchTerms": [keyword.strip()],
         "searchPosts": True,
         "searchComments": False,
         "searchCommunities": False,
-        "searchUsers": False,
-        "sort": sort,
-        "time": time_filter,
-        "maxItems": max_posts * (max_comments + 1),
-        "maxPostCount": max_posts,
-        "maxComments": max_comments,
-        "includeMediaLinks": True,
-        "maxRequestRetries": 2,
+        "searchSort": sort if not (start_date or end_date) else "new",
+        "searchTime": time_filter if not (start_date or end_date) else "all",
+        "maxPostsCount": max_posts,
+        "maxCommentsCount": 0,
+        "crawlCommentsPerPost": False,
+        "includeNSFW": False,
         "proxy": {"useApifyProxy": True},
     }
-
     if subreddit:
-        run_input["searchCommunityName"] = subreddit.strip().lstrip("r/")
+        run_input["withinCommunity"] = subreddit.strip().lstrip("r/")
+    if start_date:
+        run_input["postedAfter"] = start_date
+    if end_date:
+        run_input["postedBefore"] = end_date
 
     logger.info(
-        "Historical search: keyword=%r subreddit=%r sort=%s time=%s posts=%s comments=%s",
-        keyword, subreddit, sort or "default", time_filter, max_posts, max_comments,
+        "Historical search: r/%s | %r | dates=%s..%s | sort=%s | max_posts=%s",
+        subreddit or "*", keyword, start_date or "-", end_date or "-",
+        run_input["searchSort"], max_posts,
     )
 
     client = get_client()
     try:
-        run = client.actor(POSTS_ACTOR).call(
+        run = client.actor(HISTORICAL_ACTOR).call(
             run_input=run_input,
             run_timeout=timedelta(seconds=1800),
         )
-
         if run is None:
-            logger.error("Historical search actor returned no result.")
+            logger.error("Historical actor returned no run result.")
             return [], None
-
         if run.status != "SUCCEEDED":
-            logger.warning(
-                "Historical search finished with status=%r; dataset may be incomplete.",
-                run.status,
-            )
+            logger.warning("Historical actor finished with status=%r; dataset may be incomplete.", run.status)
 
         dataset_id = run.default_dataset_id
-        items = list(client.dataset(dataset_id).iterate_items())
+        raw_items = list(client.dataset(dataset_id).iterate_items())
+        items = []
+        for raw in raw_items:
+            normalized = _normalize_historical_post(raw, subreddit)
+            if normalized:
+                items.append(normalized)
+
         logger.info(
-            "Historical search returned %d items (run status: %s).",
-            len(items), run.status,
+            "Historical actor returned %d raw items; %d normalized posts (status=%s).",
+            len(raw_items), len(items), run.status,
         )
         return items, dataset_id
-
     except KeyboardInterrupt:
         logger.warning("Historical search interrupted.")
         return [], None
-    except Exception as e:
-        logger.exception("Historical search failed for %r: %s", keyword, e)
+    except Exception as exc:
+        logger.exception("Historical search failed for %r: %s", keyword, exc)
         return [], None
 
 
@@ -1580,215 +1654,226 @@ def report_progress(target_posts=5000, target_accounts=1000):
 
 
 
-# MAIN
 
+#################################################
+# ACCOUNT CANDIDATE SELECTION
+#################################################
+
+def get_candidate_usernames(min_relevant_posts=3, min_topics=1, limit=30):
+    """Return raw usernames for accounts with repeated topic-relevant activity."""
+    _validate_limit("min_relevant_posts", min_relevant_posts)
+    _validate_limit("min_topics", min_topics)
+
+    mapping = _load_account_map()
+    if not mapping:
+        logger.warning("No local account map exists at %s.", ACCOUNT_MAP_PATH)
+        return []
+
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            """
+            SELECT account_id,
+                   COUNT(*) AS relevant_posts,
+                   COUNT(DISTINCT COALESCE(topic, 'unknown')) AS topic_count,
+                   COUNT(DISTINCT subreddit) AS subreddit_count
+            FROM posts
+            WHERE is_relevant = 1
+            GROUP BY account_id
+            HAVING COUNT(*) >= ?
+               AND COUNT(DISTINCT COALESCE(topic, 'unknown')) >= ?
+            ORDER BY relevant_posts DESC, topic_count DESC, subreddit_count DESC
+            """,
+            (min_relevant_posts, min_topics),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    usernames = []
+    for row in rows:
+        username = mapping.get(row["account_id"])
+        if not username or username.lower() in ("[deleted]", "[removed]"):
+            continue
+        usernames.append(username)
+        if limit > 0 and len(usernames) >= limit:
+            break
+
+    logger.info("Selected %d candidate account(s).", len(usernames))
+    return usernames
+
+
+def print_candidate_accounts(limit=50):
+    """Print ranked anonymous candidate accounts for manual review."""
+    _validate_limit("limit", limit)
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            """
+            SELECT account_id, COUNT(*) AS relevant_posts,
+                   COUNT(DISTINCT COALESCE(topic, 'unknown')) AS topic_count,
+                   COUNT(DISTINCT subreddit) AS subreddit_count,
+                   MIN(created_utc) AS first_activity,
+                   MAX(created_utc) AS last_activity
+            FROM posts
+            WHERE is_relevant = 1
+            GROUP BY account_id
+            ORDER BY relevant_posts DESC, topic_count DESC, subreddit_count DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    if not rows:
+        print("No topic-relevant candidate accounts found.")
+        return
+    print("account_id\trelevant_posts\ttopics\tsubreddits\tfirst_activity\tlast_activity")
+    for row in rows:
+        print(f"{row['account_id']}\t{row['relevant_posts']}\t{row['topic_count']}\t{row['subreddit_count']}\t{row['first_activity']}\t{row['last_activity']}")
+
+
+#################################################
+# MAIN
+#################################################
 
 if __name__ == "__main__":
-
     parser = argparse.ArgumentParser(
-        description="Collect public Reddit data for the coordination-analysis project."
+        description="Collect focused public Reddit data for the coordination-analysis project."
     )
     parser.add_argument(
-        "--mode",
-        choices=("recent", "historical", "accounts", "both", "full"),
+        "--mode", choices=("recent", "historical", "accounts", "candidates", "both", "full"),
         default="historical",
-        help=(
-            "recent=/new/ feed; historical=keyword history; "
-            "accounts=history of usernames seen in earlier runs (read from "
-            "the local account-mapping file, not the database -- see "
-            "ACCOUNT_MAP_PATH); both=recent+keyword; "
-            "full=recent+keyword+account history."
-        ),
+        help="recent=/new/; historical=keyword history; accounts=selected candidate histories; candidates=list candidates; both=recent+historical; full=recent+historical+selected histories.",
     )
     parser.add_argument("--backfill", action="store_true", help="Recompute topic/language/sentiment without Apify calls.")
+    parser.add_argument("--subreddit", action="append", dest="subreddits", help="Scrape only this subreddit; repeat for multiple.")
+    parser.add_argument("--keyword", action="append", dest="keywords", help="Historical keyword; repeat for multiple.")
+    parser.add_argument("--start-date", default=None, help="Historical posts on/after YYYY-MM-DD (UTC).")
+    parser.add_argument("--end-date", default=None, help="Historical posts on/before YYYY-MM-DD (UTC, inclusive).")
     parser.add_argument("--recent-posts", type=int, default=100)
-    parser.add_argument("--recent-comments", type=int, default=10)
+    parser.add_argument("--recent-comments", type=int, default=0)
     parser.add_argument("--historical-posts", type=int, default=100)
-    parser.add_argument("--historical-comments", type=int, default=10)
-    parser.add_argument(
-        "--historical-sorts", nargs="+", default=["top"],
-        choices=("relevance", "hot", "top", "new", "rising", "comments"),
-        help="One or more search sorts for keyword history. Repeated sorts can uncover different results.",
-    )
-    parser.add_argument(
-        "--historical-time", default="all",
-        choices=("all", "hour", "day", "week", "month", "year"),
-        help="Reddit search time filter for keyword history.",
-    )
-    parser.add_argument(
-        "--max-historical-jobs", type=int, default=0,
-        help="Maximum keyword-search jobs; 0 means all jobs.",
-    )
-    parser.add_argument(
-        "--keyword", action="append", dest="keywords",
-        help="Override the default historical keyword list. Repeat this option.",
-    )
-    parser.add_argument(
-        "--account-limit", type=int, default=0,
-        help="Maximum number of stored accounts for account-history mode; 0 means all available usernames.",
-    )
-    parser.add_argument("--account-posts", type=int, default=100, help="Posts per account/subreddit/sort.")
-    parser.add_argument("--account-comments", type=int, default=0, help="Comments per account/subreddit/sort; 0 disables comment history.")
-    parser.add_argument(
-        "--account-post-sorts", nargs="+", default=["new", "top"],
-        choices=("relevance", "hot", "top", "new", "rising", "comments"),
-        help="Sorts used for account post history.",
-    )
-    parser.add_argument(
-        "--account-comment-sorts", nargs="+", default=["new", "top"],
-        choices=("relevance", "hot", "top", "new", "rising", "comments"),
-        help="Sorts used for account comment history.",
-    )
-    parser.add_argument(
-        "--account-time", default="all",
-        choices=("all", "hour", "day", "week", "month", "year"),
-        help="Reddit search time filter for account history.",
-    )
-    parser.add_argument(
-        "--delay", type=float, default=2.0,
-        help="Delay between account-history actor calls in seconds.",
-    )
-    parser.add_argument(
-        "--no-profiles", action="store_true",
-        help="Do not fetch missing account profile metadata after collection.",
-    )
+    parser.add_argument("--historical-comments", type=int, default=0)
+    parser.add_argument("--historical-sorts", nargs="+", default=["top"], choices=("relevance", "hot", "top", "new", "rising", "comments"))
+    parser.add_argument("--historical-time", default="all", choices=("all", "hour", "day", "week", "month", "year"))
+    parser.add_argument("--max-historical-jobs", type=int, default=0)
+    parser.add_argument("--account-limit", type=int, default=30)
+    parser.add_argument("--candidate-min-posts", type=int, default=3)
+    parser.add_argument("--candidate-min-topics", type=int, default=1)
+    parser.add_argument("--account-posts", type=int, default=50)
+    parser.add_argument("--account-comments", type=int, default=0)
+    parser.add_argument("--account-post-sorts", nargs="+", default=["new"], choices=("relevance", "hot", "top", "new", "rising", "comments"))
+    parser.add_argument("--account-comment-sorts", nargs="+", default=["new"], choices=("relevance", "hot", "top", "new", "rising", "comments"))
+    parser.add_argument("--account-time", default="all", choices=("all", "hour", "day", "week", "month", "year"))
+    parser.add_argument("--delay", type=float, default=2.0)
+    parser.add_argument("--no-profiles", action="store_true")
     args = parser.parse_args()
 
-    if args.recent_posts < 1 or args.recent_comments < 0:
-        parser.error("--recent-posts must be >= 1 and --recent-comments must be >= 0")
-    if args.historical_posts < 1 or args.historical_comments < 0:
-        parser.error("--historical-posts must be >= 1 and --historical-comments must be >= 0")
-    if args.max_historical_jobs < 0 or args.account_limit < 0:
-        parser.error("job/account limits cannot be negative")
-    if args.account_posts < 1:
-        parser.error("--account-posts must be >= 1")
-    if args.account_comments < 0:
-        parser.error("--account-comments must be >= 0")
-    if args.delay < 0:
-        parser.error("--delay cannot be negative")
+    try:
+        _validate_date_range(args.start_date, args.end_date)
+    except ValueError as exc:
+        parser.error(str(exc))
+
+    if args.recent_posts < 1 or args.historical_posts < 1 or args.account_posts < 1:
+        parser.error("post limits must be >= 1")
+    if args.recent_comments < 0 or args.historical_comments < 0 or args.account_comments < 0:
+        parser.error("comment limits must be >= 0")
+    if args.max_historical_jobs < 0 or args.account_limit < 0 or args.delay < 0:
+        parser.error("limits/delay cannot be negative")
+    if args.candidate_min_posts < 1 or args.candidate_min_topics < 1:
+        parser.error("candidate thresholds must be >= 1")
 
     init_db()
 
     if args.backfill:
-        logger.info("Running enrichment backfill on existing rows (no Apify calls)...")
+        logger.info("Running enrichment backfill (no Apify calls)...")
         backfill_enrichment()
         report_progress()
         sys.exit(0)
 
-    SUBREDDITS = [
-        "Nepal",
-        "NepaliPolitics",
-        "nepalinews",
-        "NepalSocial",
-        "SouthAsia",
-        "Kathmandu",
-    ]
-    HISTORICAL_KEYWORDS = args.keywords or HISTORICAL_SEARCH_TERMS
+    default_subreddits = ["Nepal", "NepaliPolitics", "nepalinews", "NepalSocial"]
+    subreddits = [s.strip().lstrip("r/") for s in (args.subreddits or default_subreddits) if s.strip()]
+    if not subreddits:
+        parser.error("provide at least one --subreddit")
 
-    logger.info("Starting Reddit collection: mode=%s", args.mode)
-    logger.info("Target subreddits: %s", ", ".join(SUBREDDITS))
+    keywords = list(dict.fromkeys(
+        re.sub(r"\s+", " ", k.strip().lower())
+        for k in (args.keywords or HISTORICAL_SEARCH_TERMS) if k and k.strip()
+    ))
 
     totals = {"posts": 0, "comments": 0, "users": 0}
 
-    def maybe_fetch_profiles(stats):
-        if args.no_profiles:
-            return
-        raw_usernames = stats.get("usernames", [])
-        if not raw_usernames:
-            return
-        raw_usernames = unprofiled_only(raw_usernames)
-        if not raw_usernames:
-            return
-        logger.info("Fetching profile metadata for %d newly observed account(s).", len(raw_usernames))
-        profile_items, _ = collect_user_profiles(raw_usernames)
-        if profile_items:
-            logger.info("%s", save_user_profiles(profile_items))
-
-    def save_batch(items, dataset_id, mode, keyword, subreddits):
+    def save_batch(items, dataset_id, mode, keyword, batch_subreddits):
         if not items:
             return
-        stats = save_items(
-            items,
-            subreddits=subreddits,
-            dataset_id=dataset_id,
-            collection_mode=mode,
-            search_keyword=keyword,
-        )
+        stats = save_items(items, batch_subreddits, dataset_id, mode, keyword)
         totals["posts"] += stats["posts"]
         totals["comments"] += stats["comments"]
         totals["users"] += stats["users"]
-        maybe_fetch_profiles(stats)
 
+        # Profile enrichment is expensive; only do it when explicitly requested.
+        if not args.no_profiles:
+            usernames = unprofiled_only(stats.get("usernames", []))
+            if usernames:
+                profile_items, _ = collect_user_profiles(usernames)
+                if profile_items:
+                    save_user_profiles(profile_items)
 
-    # RECENT MODE
     if args.mode in ("recent", "both", "full"):
-        items, dataset_id = collect_posts(
-            subreddits=SUBREDDITS,
-            max_posts=args.recent_posts,
-            max_comments=args.recent_comments,
-        )
-        save_batch(items, dataset_id, "recent_new_feed", None, SUBREDDITS)
+        items, dataset_id = collect_posts(subreddits, args.recent_posts, args.recent_comments)
+        save_batch(items, dataset_id, "recent_new_feed", None, subreddits)
 
-
-    # HISTORICAL KEYWORD MODE
     if args.mode in ("historical", "both", "full"):
         jobs = []
-        seen = set()
-        for subreddit in SUBREDDITS:
-            for keyword in HISTORICAL_KEYWORDS:
-                keyword_clean = re.sub(r"\s+", " ", keyword.strip().lower())
-                if not keyword_clean:
-                    continue
+        for subreddit in subreddits:
+            for keyword in keywords:
                 for sort in args.historical_sorts:
-                    key = (subreddit.lower(), keyword_clean, sort)
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    jobs.append((subreddit, keyword_clean, sort))
-
+                    jobs.append((subreddit, keyword, sort))
+        # Deduplicate identical jobs while preserving order.
+        jobs = list(dict.fromkeys(jobs))
         if args.max_historical_jobs > 0:
             jobs = jobs[:args.max_historical_jobs]
+        logger.info("Historical jobs: %d", len(jobs))
 
-        logger.info("Historical keyword jobs to run: %d", len(jobs))
-
-        for index, (subreddit, keyword, sort) in enumerate(jobs, start=1):
-            logger.info(
-                "Historical keyword job %d/%d: r/%s | %r | sort=%s | time=%s",
-                index, len(jobs), subreddit, keyword, sort, args.historical_time,
-            )
+        for i, (subreddit, keyword, sort) in enumerate(jobs, 1):
+            logger.info("Historical %d/%d: r/%s | %r | sort=%s", i, len(jobs), subreddit, keyword, sort)
             items, dataset_id = collect_historical_keyword_search(
-                keyword=keyword,
-                subreddit=subreddit,
-                max_posts=args.historical_posts,
-                max_comments=args.historical_comments,
-                sort=sort,
-                time_filter=args.historical_time,
+                keyword, subreddit, args.historical_posts, args.historical_comments, sort, args.historical_time,
+                args.start_date, args.end_date
             )
-            save_batch(
-                items,
-                dataset_id,
-                "historical_keyword",
-                keyword,
-                [subreddit],
-            )
+            save_batch(items, dataset_id, "historical_keyword", keyword, [subreddit])
 
+    if args.mode == "candidates":
+        print_candidate_accounts(args.account_limit or 50)
 
-    # ACCOUNT-SPECIFIC HISTORICAL MODE
     if args.mode in ("accounts", "full"):
-        account_totals = collect_known_account_history(
-            subreddits=SUBREDDITS,
-            max_accounts=args.account_limit,
-            post_limit=args.account_posts,
-            comment_limit=args.account_comments,
-            post_sorts=tuple(dict.fromkeys(args.account_post_sorts)),
-            comment_sorts=tuple(dict.fromkeys(args.account_comment_sorts)),
-            time_filter=args.account_time,
-            delay_seconds=args.delay,
+        candidates = get_candidate_usernames(
+            min_relevant_posts=args.candidate_min_posts,
+            min_topics=args.candidate_min_topics,
+            limit=args.account_limit,
         )
-        logger.info("Account-history totals: %s", account_totals)
+        logger.info("Deep-history candidates: %d", len(candidates))
+
+        for i, username in enumerate(candidates, 1):
+            logger.info("Account history %d/%d: u/%s", i, len(candidates), username)
+            for subreddit in subreddits:
+                for sort in dict.fromkeys(args.account_post_sorts):
+                    items, dataset_id = collect_account_history_posts(
+                        username, subreddit, args.account_posts, sort, args.account_time
+                    )
+                    save_batch(items, dataset_id, "historical_account_posts", f"author:{username}", [subreddit])
+                    if args.delay:
+                        time.sleep(args.delay)
+
+                if args.account_comments > 0:
+                    for sort in dict.fromkeys(args.account_comment_sorts):
+                        items, dataset_id = collect_account_history_comments(
+                            username, subreddit, args.account_comments, sort, args.account_time
+                        )
+                        save_batch(items, dataset_id, "historical_account_comments", f"author:{username}", [subreddit])
+                        if args.delay:
+                            time.sleep(args.delay)
 
     report_progress()
-    logger.info(
-        "Collection completed. Newly inserted records this process: posts=%d, comments=%d, users_seen=%d",
-        totals["posts"], totals["comments"], totals["users"],
-    )
+    logger.info("Newly inserted this process: posts=%d comments=%d users=%d", totals["posts"], totals["comments"], totals["users"])
