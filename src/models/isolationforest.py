@@ -1,8 +1,4 @@
 # src/models/isolationforest.py
-import sys
-import os
-
-sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 
 import numpy as np
 import pandas as pd
@@ -12,7 +8,7 @@ from sklearn.ensemble import IsolationForest
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import roc_auc_score, classification_report, confusion_matrix
 
-from config import BENCHMARK_DB_PATH, ISOLATION_FOREST
+from src.config import BENCHMARK_DB_PATH, ISOLATION_FOREST
 
 
 def get_connection():

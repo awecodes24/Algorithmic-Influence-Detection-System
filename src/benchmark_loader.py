@@ -3,9 +3,9 @@ import sqlite3
 import os
 import uuid
 from datetime import datetime
-from config import BENCHMARK_DB_PATH, BENCHMARK
+from src.config import BENCHMARK, BENCHMARK_DB_PATH
 
-CRESCI_PATH = os.path.join(BENCHMARK, "cresci-2017")
+CRESCI_PATH = BENCHMARK / "cresci-2017"
 
 
 # benchmark dataset haru

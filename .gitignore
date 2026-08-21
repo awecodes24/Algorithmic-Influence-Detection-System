@@ -1,38 +1,23 @@
-# Python bytecode and caches
 __pycache__/
 *.py[cod]
-*$py.class
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
 
-# Virtual environments
-venv/
 .venv/
-env/
-ENV/
+venv/
 
-# Jupyter notebooks
-.ipynb_checkpoints/
-
-# Environment configuration
 .env
-.env.*
-!.env.example
 
-# Local databases and logs
-*.sqlite
-*.sqlite3
-*.log
+.account_map.json
 
-# Project data and generated outputs
-/outputs/
-*/influence.db-shm
-*/influence.db-wal
+data/*.db
+data/*.db-wal
+data/*.db-shm
 
-# Editor and OS files
+data/raw/
+data/processed/
+data/benchmark/
+
+outputs/
+
 .vscode/
 .idea/
 .DS_Store
-Thumbs.db
-.account_map.json

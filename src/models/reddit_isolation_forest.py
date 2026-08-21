@@ -4,25 +4,20 @@
 # Cresci-2017 remains the only labeled dataset for AUC-ROC validation --
 # this script is for actual detection, not accuracy measurement.
 
-import sys
-import os
-sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
-
 import numpy as np
 import pandas as pd
 from datetime import datetime, timezone
 from sklearn.ensemble import IsolationForest
 from sklearn.preprocessing import StandardScaler
 
-try:
-    from src.db import get_conn
-except ModuleNotFoundError:
-    from db import get_conn
+from src.db import get_conn
 
 import logging
-logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s"
+)
 logger = logging.getLogger(__name__)
-
 
 FEATURE_COLUMNS = [
     'age_days', 'posts_per_day', 'comments_per_day', 'comment_ratio',

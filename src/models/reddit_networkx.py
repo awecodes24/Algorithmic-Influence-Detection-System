@@ -12,20 +12,13 @@
 # Both are directed (source = the account taking the action) and weighted
 # by how many times that pair interacted that way.
 
-import sys
-import os
-sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
-
 import pandas as pd
 import networkx as nx
 from datetime import datetime, timezone
 
-try:
-    from src.db import get_conn
-except ModuleNotFoundError:
-    from db import get_conn
-
+from src.db import get_conn
 import logging
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 logger = logging.getLogger(__name__)
 

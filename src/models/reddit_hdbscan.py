@@ -6,25 +6,14 @@
 # Coordination Score follows the proposal's Eq. 4.5: normalized HDBSCAN
 # cluster persistence, with noise (label = -1) scored 0.
 
-import sys
-import os
-sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
-
 import numpy as np
 import pandas as pd
 import hdbscan
 from datetime import datetime, timezone
 from sklearn.preprocessing import StandardScaler
 
-try:
-    from src.db import get_conn
-except ModuleNotFoundError:
-    from db import get_conn
-
-try:
-    from src.config import HDBSCAN_PARAMS
-except ModuleNotFoundError:
-    from config import HDBSCAN_PARAMS
+from src.db import get_conn
+from src.config import HDBSCAN_PARAMS
 
 import logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")

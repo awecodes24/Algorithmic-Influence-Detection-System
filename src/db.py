@@ -1,21 +1,32 @@
 # src/db.py
 
-from pathlib import Path
+from __future__ import annotations
+
 import sqlite3
+from pathlib import Path
+
+from src.config import DB_PATH, ensure_directories
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
 DB_PATH = DATA_DIR / "influence.db"
 
 
-def get_conn():
-    DATA_DIR.mkdir(exist_ok=True)
+def get_conn(db_path: str | Path | None = None):
+    ensure_directories()
 
-    conn = sqlite3.connect(DB_PATH)
+    path = Path(db_path) if db_path else DB_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    conn = sqlite3.connect(path)
+
     conn.row_factory = sqlite3.Row
+
     conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA synchronous = NORMAL")
+    conn.execute("PRAGMA busy_timeout = 60000")
+
     return conn
 
 
@@ -320,6 +331,27 @@ def init_db():
         f1_score            REAL,
         created_at          TEXT DEFAULT CURRENT_TIMESTAMP
     );
+    
+    CREATE TABLE IF NOT EXISTS collection_runs (
+        run_id TEXT PRIMARY KEY,
+        started_at TEXT NOT NULL,
+        finished_at TEXT,
+        collection_method TEXT NOT NULL,
+        mode TEXT NOT NULL,
+        subreddits TEXT,
+        search_terms TEXT,
+        fetched_posts INTEGER DEFAULT 0,
+        inserted_posts INTEGER DEFAULT 0,
+        duplicate_posts INTEGER DEFAULT 0,
+        rejected_posts INTEGER DEFAULT 0,
+        fetched_comments INTEGER DEFAULT 0,
+        inserted_comments INTEGER DEFAULT 0,
+        new_accounts INTEGER DEFAULT 0,
+        total_posts INTEGER DEFAULT 0,
+        total_accounts INTEGER DEFAULT 0,
+        status TEXT DEFAULT 'running',
+        error_message TEXT
+    );
 
     ----------------------------------------------------
     -- INDEXES
@@ -414,6 +446,12 @@ def init_db():
 
     CREATE INDEX IF NOT EXISTS idx_event_time
         ON coordination_events(event_time);
+        
+    CREATE INDEX IF NOT EXISTS idx_collection_runs_status
+        ON collection_runs(status);
+
+    CREATE INDEX IF NOT EXISTS idx_collection_runs_started
+        ON collection_runs(started_at);
     """)
 
     _migrate_schema(conn)

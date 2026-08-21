@@ -125,22 +125,22 @@ on the actor's Store page, not assumed field names):
     Run with `python collector.py --backfill`.
 """
 
-import os
 import re
-import sys
+import os
 import json
 import hashlib
 import logging
 import time
 import argparse
 from datetime import datetime, timezone, timedelta
+from src.config import REDDIT_COLLECTION
 
 from dotenv import load_dotenv
 
 try:
     from langdetect import detect, DetectorFactory
     from langdetect.lang_detect_exception import LangDetectException
-    DetectorFactory.seed = 0  # deterministic results across runs
+    DetectorFactory.seed = 0
     LANGDETECT_AVAILABLE = True
 except ImportError:
     LANGDETECT_AVAILABLE = False
@@ -153,10 +153,7 @@ except ImportError:
     _sentiment_analyzer = None
     VADER_AVAILABLE = False
 
-try:
-    from src.db import get_conn, init_db
-except ModuleNotFoundError:
-    from db import get_conn, init_db
+from src.db import get_conn, init_db
 
 
 
@@ -1622,7 +1619,10 @@ def backfill_enrichment(batch_size=500):
 # PROGRESS REPORTING
 
 
-def report_progress(target_posts=5000, target_accounts=1000):
+def report_progress(
+    target_posts=REDDIT_COLLECTION["target_posts"],
+    target_accounts=REDDIT_COLLECTION["target_accounts"],
+):
     """
     Prints cumulative totals across ALL collection runs so far -- a single
     run's max_posts cap won't reach the proposal's stated minimum

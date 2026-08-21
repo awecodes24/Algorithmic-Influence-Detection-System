@@ -1,45 +1,51 @@
-# run_pipeline.py
-# Convenience runner for everything AFTER data collection: feature
-# engineering -> all four detection models -> composite score.
-# Run this again every time you collect a fresh batch with collector.py.
-#
-# Data collection (collector.py) and the dashboard (dashboard.py) are
-# deliberately NOT included here -- collection needs your live Apify
-# token and judgment about timing/volume, and the dashboard is a server
-# you leave running, not a one-shot step.
-#
-# Usage: python run_pipeline.py   (from the project root)
+from __future__ import annotations
 
 import subprocess
 import sys
 
+from src.config import BASE_DIR, ensure_runtime_ready
+from src.db import init_db
+
+
 STEPS = [
-    ("Feature engineering",          ["python3", "src/reddit_preprocessor.py"]),
-    ("Isolation Forest",             ["python3", "src/models/reddit_isolation_forest.py"]),
-    ("HDBSCAN clustering",           ["python3", "src/models/reddit_hdbscan.py"]),
-    ("Cosine similarity",            ["python3", "src/models/reddit_cosine_similarity.py"]),
-    ("NetworkX / PageRank",          ["python3", "src/models/reddit_networkx.py"]),
-    ("Composite Influence Score",    ["python3", "src/composite_score.py"]),
+    ("Feature engineering", "src.reddit_preprocessor"),
+    ("Isolation Forest", "src.models.reddit_isolation_forest"),
+    ("HDBSCAN clustering", "src.models.reddit_hdbscan"),
+    ("Cosine similarity", "src.models.reddit_cosine_similarity"),
+    ("NetworkX / PageRank", "src.models.reddit_networkx"),
+    ("Composite Influence Score", "src.composite_score"),
 ]
 
 
+def run_step(label, module):
+    print("\n" + "=" * 64)
+    print(f"  {label}")
+    print(f"  python -m {module}")
+    print("=" * 64)
+
+    result = subprocess.run(
+        [sys.executable, "-m", module],
+        cwd=BASE_DIR,
+    )
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"{label} failed with exit code {result.returncode}"
+        )
+
+
 def main():
-    for i, (label, cmd) in enumerate(STEPS, start=1):
-        print(f"\n{'=' * 60}")
-        print(f"  STEP {i}/{len(STEPS)}: {label}")
-        print(f"{'=' * 60}")
+    ensure_runtime_ready()
+    init_db()
 
-        result = subprocess.run(cmd)
+    for index, (label, module) in enumerate(STEPS, start=1):
+        print(f"\nSTEP {index}/{len(STEPS)}")
+        run_step(label, module)
 
-        if result.returncode != 0:
-            print(f"\n[STOPPED] '{label}' failed (exit code {result.returncode}).")
-            print("Fix the error above before continuing -- later steps depend on this one's output.")
-            sys.exit(1)
-
-    print(f"\n{'=' * 60}")
-    print("  ALL STEPS COMPLETE")
-    print(f"{'=' * 60}")
-    print("Run `streamlit run src/dashboard.py` to view the results.")
+    print("\n" + "=" * 64)
+    print("  REDDIT ANALYSIS PIPELINE COMPLETE")
+    print("=" * 64)
+    print("Run: streamlit run src/dashboard.py")
 
 
 if __name__ == "__main__":

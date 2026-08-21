@@ -5,14 +5,15 @@
 import numpy as np
 from datetime import datetime, timezone
 from collections import defaultdict
-
-try:
-    from src.db import get_conn
-except ModuleNotFoundError:
-    from db import get_conn
-
 import logging
-logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+
+from src.db import get_conn
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s"
+)
+
 logger = logging.getLogger(__name__)
 
 

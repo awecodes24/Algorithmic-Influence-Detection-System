@@ -10,15 +10,9 @@
 import pandas as pd
 from datetime import datetime, timezone
 
-try:
-    from src.db import get_conn
-except ModuleNotFoundError:
-    from db import get_conn
+from src.db import get_conn
 
-try:
-    from src.config import WEIGHTS, TIERS
-except ModuleNotFoundError:
-    from config import WEIGHTS, TIERS
+from src.config import WEIGHTS, TIERS
 
 import logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")

@@ -13,11 +13,6 @@
 #
 # Run this AFTER benchmark_preprocessor.py (needs the features table populated)
 
-import sys
-import os
-
-sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
-
 import numpy as np
 import pandas as pd 
 import sqlite3
@@ -25,7 +20,7 @@ import hdbscan
 from datetime import datetime
 from sklearn.preprocessing import StandardScaler
 
-from config import BENCHMARK_DB_PATH, HDBSCAN_PARAMS
+from src.config import BENCHMARK_DB_PATH, HDBSCAN_PARAMS
 
 
 

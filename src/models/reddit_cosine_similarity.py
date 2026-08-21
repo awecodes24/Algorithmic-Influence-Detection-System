@@ -9,25 +9,14 @@
 #     account's own posts+comments that duplicate something posted by a
 #     DIFFERENT account. This is what feeds the composite Influence Score.
 
-import sys
-import os
-sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
-
 import numpy as np
 import pandas as pd
 from datetime import datetime, timezone
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.neighbors import NearestNeighbors
 
-try:
-    from src.db import get_conn
-except ModuleNotFoundError:
-    from db import get_conn
-
-try:
-    from src.config import COSINE_THRESHOLD
-except ModuleNotFoundError:
-    from config import COSINE_THRESHOLD
+from src.db import get_conn
+from src.config import COSINE_THRESHOLD
 
 import logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
