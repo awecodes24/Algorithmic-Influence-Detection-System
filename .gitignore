@@ -20,4 +20,5 @@ outputs/
 
 .vscode/
 .idea/
-.DS_Store
+data/
+.account_map.json
