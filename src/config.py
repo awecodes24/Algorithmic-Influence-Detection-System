@@ -79,7 +79,7 @@ HDBSCAN_PARAMS = {
 }
 
 COSINE_THRESHOLD = float(
-    os.getenv("COSINE_THRESHOLD", "0.90")
+    os.getenv("COSINE_THRESHOLD", "0.80")
 )
 
 

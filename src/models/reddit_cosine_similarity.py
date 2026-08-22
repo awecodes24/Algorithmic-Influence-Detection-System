@@ -29,27 +29,50 @@ logger = logging.getLogger(__name__)
 # not a tuned value -- revisit if the output below looks like junk.
 MIN_TEXT_LENGTH = 20
 
+# Very short texts can produce misleadingly high TF-IDF similarity.
+# A match must contain enough words to be considered meaningful
+# coordination evidence.
+MIN_WORDS_FOR_COORDINATION = 8
+
 # Reddit's own placeholders for removed/deleted content -- identical
 # across thousands of unrelated accounts by construction, and would
 # otherwise dominate the results as false "coordination".
 PLACEHOLDER_TEXT = {"[deleted]", "[removed]", ""}
 
 
-def load_content():
+def load_content(relevant_only=True):
     """
     Pulls post titles+text and comment text as one combined corpus of
     "content items", each tagged with the account that authored it.
     Posts and comments are treated the same way -- coordinated
     near-duplicate content can show up in either.
+
+    relevant_only: when True (default), only pulls rows where
+    is_relevant=1 -- the flag collector.classify_topic() already sets
+    on every row against HISTORICAL_SEARCH_TERMS/TOPIC_KEYWORDS at
+    collection time. collect_posts() pulls r/<subreddit>/new/ wholesale,
+    so a chunk of what lands in `posts`/`comments` is on-subreddit but
+    off-topic; comparing those rows for near-duplicates just adds noise
+    two unrelated accounts could trivially "match" on (a subreddit rule,
+    a flair template) and never reflects real coordination. is_relevant
+    is stored and indexed (db.py: idx_post_relevance/idx_comment_relevance)
+    but nothing here filtered on it until now.
+
+    Set relevant_only=False to compare against the unfiltered run --
+    classify_topic()'s own keyword list is admittedly incomplete for
+    Romanized Nepali (see its docstring), so on a small dataset this
+    filter could cut out real on-topic rows it simply didn't catch.
+    Run both and compare pair counts before trusting either alone.
     """
     conn = get_conn()
+    relevance_clause = " WHERE is_relevant = 1" if relevant_only else ""
     posts = pd.read_sql(
         "SELECT id, account_id, created_utc, "
         "COALESCE(title, '') || ' ' || COALESCE(text, '') AS content "
-        "FROM posts", conn
+        f"FROM posts{relevance_clause}", conn
     )
     comments = pd.read_sql(
-        "SELECT id, account_id, created_utc, text AS content FROM comments", conn
+        f"SELECT id, account_id, created_utc, text AS content FROM comments{relevance_clause}", conn
     )
     conn.close()
 
@@ -64,8 +87,9 @@ def load_content():
         (~df['content'].isin(PLACEHOLDER_TEXT))
     ].reset_index(drop=True)
     logger.info(
-        f"Loaded {before} content items, kept {len(df)} after dropping "
-        f"short/empty/deleted text (min length={MIN_TEXT_LENGTH} chars)"
+        f"Loaded {before} content items (relevant_only={relevant_only}), "
+        f"kept {len(df)} after dropping short/empty/deleted text "
+        f"(min length={MIN_TEXT_LENGTH} chars)"
     )
     return df
 
@@ -112,23 +136,69 @@ def find_near_duplicates(df):
             seen.add(pair_key)
 
             acc_i, acc_j = df.at[i, 'account_id'], df.at[j, 'account_id']
+
             if acc_i == acc_j:
                 # Same account duplicating its own content is spam, not
-                # coordination BETWEEN accounts -- out of scope here.
+                # coordination BETWEEN accounts.
+                continue
+
+
+            # ---------------------------------------------------------------
+            # Reject very short matches.
+            #
+            # Short generic comments can have high TF-IDF cosine similarity
+            # without representing coordinated behavior. Require both pieces
+            # of content to contain enough words before treating the pair as
+            # meaningful duplicate-content evidence.
+            # ---------------------------------------------------------------
+            text_i = df.at[i, 'content']
+            text_j = df.at[j, 'content']
+
+            word_count_i = len(str(text_i).split())
+            word_count_j = len(str(text_j).split())
+
+            if (
+                word_count_i < MIN_WORDS_FOR_COORDINATION
+                or word_count_j < MIN_WORDS_FOR_COORDINATION
+            ):
                 continue
 
             pairs.append({
-                'item_i': i, 'item_j': j,
-                'account_i': acc_i, 'account_j': acc_j,
-                'content_id_i': df.at[i, 'id'], 'content_id_j': df.at[j, 'id'],
-                'created_utc_i': df.at[i, 'created_utc'], 'created_utc_j': df.at[j, 'created_utc'],
+                'item_i': i,
+                'item_j': j,
+
+                'account_i': acc_i,
+                'account_j': acc_j,
+
+                'content_id_i': df.at[i, 'id'],
+                'content_id_j': df.at[j, 'id'],
+
+                'content_type_i': df.at[i, 'source'],
+                'content_type_j': df.at[j, 'source'],
+
+                'created_utc_i': df.at[i, 'created_utc'],
+                'created_utc_j': df.at[j, 'created_utc'],
+
                 'similarity': 1 - dist
             })
 
     logger.info(f"Found {len(pairs)} cross-account near-duplicate content pairs")
     return pd.DataFrame(pairs, columns=[
-        'item_i', 'item_j', 'account_i', 'account_j',
-        'content_id_i', 'content_id_j', 'created_utc_i', 'created_utc_j',
+        'item_i',
+        'item_j',
+
+        'account_i',
+        'account_j',
+
+        'content_id_i',
+        'content_id_j',
+
+        'content_type_i',
+        'content_type_j',
+
+        'created_utc_i',
+        'created_utc_j',
+
         'similarity'
     ])
 
@@ -184,6 +254,13 @@ def save_results(account_pairs, dup_scores):
     conn = get_conn()
     c = conn.cursor()
     now = datetime.now(timezone.utc).isoformat()
+    
+    # Remove previous TF-IDF similarity results so stale matches
+    # from earlier thresholds or filtering settings do not remain.
+    c.execute("""
+        DELETE FROM content_similarity
+        WHERE method = 'tfidf_cosine'
+    """)
 
     for _, row in account_pairs.iterrows():
         c.execute("""
@@ -216,42 +293,96 @@ def save_results(account_pairs, dup_scores):
 
 def save_coordination_events(pairs_df):
     """
-    coordination_events: one row per near-duplicate CONTENT PAIR, unlike
-    content_similarity above which collapses to one row per account pair
-    and keeps only the highest similarity -- the specific item_i/item_j
-    that matched gets thrown away there. This keeps that item-level detail
-    (which two actual posts/comments matched) so the dashboard can show
-    the real amplified text, not just an aggregate score.
+    Save one row per near-duplicate content pair.
+
+    source_post_id and target_post_id are retained for backward
+    compatibility with the existing database schema, but the actual
+    content type is explicitly stored in:
+
+        source_content_type
+        target_content_type
+
+    Therefore the dashboard/evidence inspector can correctly retrieve
+    matched posts or comments.
     """
+
     conn = get_conn()
     c = conn.cursor()
 
-    # Full replace, scoped to this event_type only. This script is meant
-    # to be rerun every time more data is collected (same as the other
-    # model scripts), and coordination_events has no natural unique key
-    # to upsert on -- without this delete, every rerun would pile a fresh
-    # copy of every historical pair on top of the ones already saved.
-    c.execute("DELETE FROM coordination_events WHERE event_type = 'near_duplicate_content'")
+    # Remove previous cosine-similarity events before inserting the
+    # current run. This prevents duplicate evidence accumulation.
+    c.execute("""
+        DELETE FROM coordination_events
+        WHERE event_type = 'near_duplicate_content'
+    """)
+
+    if pairs_df.empty:
+        conn.commit()
+        conn.close()
+
+        logger.info(
+            "No near-duplicate coordination events to save."
+        )
+        return
 
     for _, row in pairs_df.iterrows():
+
         event_time = None
-        if pd.notna(row['created_utc_i']) and pd.notna(row['created_utc_j']):
-            event_time = float(max(row['created_utc_i'], row['created_utc_j']))
+
+        if (
+            pd.notna(row['created_utc_i'])
+            and pd.notna(row['created_utc_j'])
+        ):
+            event_time = float(
+                max(
+                    row['created_utc_i'],
+                    row['created_utc_j']
+                )
+            )
+
         c.execute("""
-            INSERT INTO coordination_events
-                (source_account_id, target_account_id, source_post_id,
-                 target_post_id, event_type, similarity, event_time)
-            VALUES (?, ?, ?, ?, 'near_duplicate_content', ?, ?)
+            INSERT INTO coordination_events (
+
+                source_account_id,
+                target_account_id,
+
+                source_post_id,
+                target_post_id,
+
+                source_content_type,
+                target_content_type,
+
+                event_type,
+                similarity,
+                event_time
+
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
-            row['account_i'], row['account_j'],
-            row['content_id_i'], row['content_id_j'],
-            float(row['similarity']), event_time,
+
+            row['account_i'],
+            row['account_j'],
+
+            row['content_id_i'],
+            row['content_id_j'],
+
+            row['content_type_i'],
+            row['content_type_j'],
+
+            'near_duplicate_content',
+
+            float(row['similarity']),
+
+            event_time
         ))
 
     conn.commit()
     conn.close()
-    logger.info(f"Saved {len(pairs_df)} rows to coordination_events")
 
+    logger.info(
+        f"Saved {len(pairs_df)} near-duplicate "
+        f"coordination events"
+    )
 
 def print_top_duplicated(dup_scores, n=20):
     print(f"\n{'━'*50}")
@@ -264,9 +395,14 @@ def print_top_duplicated(dup_scores, n=20):
 
 
 if __name__ == "__main__":
+    # Flip to False to compare against the unfiltered run -- see
+    # load_content()'s docstring for why you'd want to check both before
+    # trusting either one on a dataset you haven't sized yet.
+    RELEVANT_ONLY = False
+
     logger.info("Running TF-IDF cosine similarity on real Reddit content\n")
 
-    df = load_content()
+    df = load_content(relevant_only=RELEVANT_ONLY)
     pairs_df = find_near_duplicates(df)
     account_pairs = compute_account_pair_scores(pairs_df)
     dup_scores = compute_dup_scores(df, pairs_df)
@@ -275,9 +411,9 @@ if __name__ == "__main__":
     print_top_duplicated(dup_scores)
 
     logger.info(
-        "NOTE: MIN_TEXT_LENGTH=20 and COSINE_THRESHOLD=0.90 are both "
-        "starting points, not tuned values. If the top accounts above "
-        "look like false positives (common short phrases, boilerplate "
-        "flair text), raise one or both; if a campaign you already know "
+        f"NOTE: MIN_TEXT_LENGTH={MIN_TEXT_LENGTH} and "
+        f"COSINE_THRESHOLD={COSINE_THRESHOLD} are starting points, "
+        "not tuned values. If the top accounts above look like false "
+        "positives, raise one or both; if a campaign you already know "
         "about isn't showing up, lower them."
     )

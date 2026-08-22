@@ -1,17 +1,53 @@
-# Data collection (src/collector.py, src/db.py)
-apify-client==3.1.2
-python-dotenv==1.2.2
-langdetect==1.0.9
-vaderSentiment==3.3.2
+# requirements.txt
+#
+# Derived by grepping every import across src/ and scripts/ (including
+# imports nested inside functions, not just top-of-file ones -- a first
+# pass using only top-of-file imports missed langdetect and
+# vaderSentiment, both of which are imported inside collector.py's
+# functions). Cross-checked against verify_setup.py's own
+# REQUIRED_MODULES list.
+#
+# Versions below pandas/numpy/scikit-learn/hdbscan/networkx/
+# python-dotenv/matplotlib/joblib are pinned to what this project has
+# actually been run against successfully (the Isolation Forest, HDBSCAN,
+# cosine similarity, and NetworkX scripts, plus the Cresci-2017
+# benchmark training scripts, all ran clean at these versions).
+#
+# streamlit, plotly, apify-client, langdetect, and vaderSentiment are
+# NOT pinned to a version verified by an actual run -- collection needs
+# network access to api.apify.com and an APIFY_API_TOKEN, and the
+# dashboard needs a display/browser context, neither of which was
+# available in the environment these were checked from. These use a
+# minimum-version floor (based on the current PyPI release as of this
+# writing) instead of an exact pin -- worth running
+# `pip freeze | grep -iE "streamlit|plotly|apify|langdetect|vader"`
+# yourself once you've run collector.py / the dashboard, and hard-pin
+# to those exact versions once confirmed, the same way the rest of this
+# file is pinned.
+#
+# Install: pip install -r requirements.txt --break-system-packages
+# (the --break-system-packages flag is only needed on systems where pip
+# refuses to install outside a virtualenv by default -- e.g. this
+# project's own sandboxed dev environment; omit it if you're already
+# inside a venv or conda environment)
 
-# Modeling / analysis
+# --- Core data / ML ---------------------------------------------------
 pandas==3.0.2
 numpy==2.4.4
 scikit-learn==1.8.0
 hdbscan==0.8.44
 networkx==3.6.1
-scipy==1.17.1
+joblib==1.5.3
 
-# Dashboard
-streamlit==1.61.1
-plotly==6.9.0
+# --- Reddit data collection --------------------------------------------
+apify-client>=1.7.0        # collector.py -- Apify actor trudax/reddit-scraper-lite
+python-dotenv==1.2.2        # loads APIFY_API_TOKEN from a local .env file
+langdetect>=1.0.9           # collector.py -- language classification (en/ne/mixed)
+vaderSentiment>=3.3.2       # collector.py -- sentiment compound score per post/comment
+
+# --- Dashboard -----------------------------------------------------------
+streamlit>=1.38.0           # src/dashboard.py
+plotly>=5.24.0               # src/dashboard.py -- interactive charts
+
+# --- Benchmark evaluation (Cresci-2017 / src/benchmarks/) ---------------
+matplotlib==3.10.8          # ROC curve plots, confusion matrices

@@ -7,12 +7,21 @@ is labelled "coordinated" without the anomaly, cluster, duplication,
 and network evidence sitting right next to it.
 """
 
+import json
 import os
 import sys
 from pathlib import Path
 from typing import Optional
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
+
+CRESCI_OUTPUT_DIR = (
+    ROOT_DIR
+    / "outputs"
+    / "cresci"
+    / "final"
+)
+
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
@@ -51,6 +60,33 @@ TIER_COLORS = {
     "organic": "#5FBE8D",
     "suspicious": "#E3A548",
     "coordinated": "#E56A65",
+}
+
+EVIDENCE_COLORS = {
+    "strong_support": "#E56A65",
+    "supported": "#E3A548",
+    "weak_support": "#7AA2F7",
+    "no_direct_evidence": "#98A2B0",
+    "insufficient_data": "#667085",
+}
+
+
+ASSESSMENT_LABELS = {
+    "insufficient_data": "Insufficient Data",
+    "likely_organic": "Likely Organic",
+    "organic_with_coordination_pattern": (
+        "Organic with Coordination Pattern"
+    ),
+    "suspicious": "Suspicious",
+    "suspicious_with_coordination_evidence": (
+        "Suspicious with Coordination Evidence"
+    ),
+    "high_priority_coordinated_pattern": (
+        "High Priority Coordinated Pattern"
+    ),
+    "likely_coordinated_influence": (
+        "Likely Coordinated Influence"
+    ),
 }
 
 # Muted, non-semantic palette for arbitrary cluster IDs — kept clear of
@@ -235,16 +271,39 @@ def load_scores() -> pd.DataFrame:
     return read_df(
         """
         SELECT
-            s.account_id, s.anomaly_score, s.coord_score, s.dup_score,
-            s.network_score, s.influence_score, s.tier, s.cluster_id,
+            s.account_id,
+            s.anomaly_score,
+            s.coord_score,
+            s.temporal_score,
+            s.dup_score,
+            s.network_score,
+            s.network_score_topic_scoped,
+            s.influence_score,
+            s.tier,
+            s.cluster_id,
+            s.confidence_level,
+            s.evidence_status,
+            s.assessment,
             s.scored_at,
-            f.age_days, f.posts_per_day, f.comments_per_day,
-            f.comment_ratio, f.hour_entropy, f.subreddit_count,
-            f.active_days, f.duplicate_ratio, f.avg_post_interval,
-            f.avg_comment_interval, f.night_activity_ratio,
-            f.burstiness_score, f.engagement_rate
+
+            f.age_days,
+            f.posts_per_day,
+            f.comments_per_day,
+            f.comment_ratio,
+            f.hour_entropy,
+            f.subreddit_count,
+            f.active_days,
+            f.duplicate_ratio,
+            f.avg_post_interval,
+            f.avg_comment_interval,
+            f.night_activity_ratio,
+            f.burstiness_score,
+            f.engagement_rate
+
         FROM scores s
-        LEFT JOIN features f ON s.account_id = f.account_id
+
+        LEFT JOIN features f
+            ON s.account_id = f.account_id
         """
     )
 
@@ -358,6 +417,104 @@ def load_pair_scores() -> pd.DataFrame:
         ORDER BY final_score DESC
         """
     )
+    
+@st.cache_data(ttl=30)
+def load_direct_evidence_events() -> pd.DataFrame:
+
+    return read_df(
+        """
+        SELECT
+            ce.source_account_id,
+            ce.target_account_id,
+            ce.source_post_id,
+            ce.target_post_id,
+            ce.event_type,
+            ce.similarity,
+            ce.event_time,
+            ce.source_content_type,
+            ce.target_content_type,
+
+            s1.influence_score AS source_influence,
+            s2.influence_score AS target_influence,
+
+            s1.tier AS source_tier,
+            s2.tier AS target_tier
+
+        FROM coordination_events ce
+
+        LEFT JOIN scores s1
+            ON ce.source_account_id = s1.account_id
+
+        LEFT JOIN scores s2
+            ON ce.target_account_id = s2.account_id
+
+        ORDER BY ce.similarity DESC
+        """
+    )
+    
+@st.cache_data(ttl=30)
+def load_account_evidence(account_id: str) -> pd.DataFrame:
+
+    return read_df(
+        """
+        SELECT
+            source_account_id,
+            target_account_id,
+            source_post_id,
+            target_post_id,
+            event_type,
+            similarity,
+            event_time,
+            source_content_type,
+            target_content_type
+
+        FROM coordination_events
+
+        WHERE source_account_id = ?
+           OR target_account_id = ?
+
+        ORDER BY
+            similarity DESC,
+            event_time DESC
+        """,
+        (
+            account_id,
+            account_id,
+        ),
+    )
+
+@st.cache_data(ttl=30)
+def load_account_pairs(account_id: str) -> pd.DataFrame:
+
+    return read_df(
+        """
+        SELECT
+            source_account_id,
+            target_account_id,
+
+            content_score,
+            temporal_score,
+            network_score,
+
+            network_volume_score,
+            network_reciprocity_score,
+            network_concentration_score,
+
+            final_score,
+            coordination_type
+
+        FROM account_pairs
+
+        WHERE source_account_id = ?
+           OR target_account_id = ?
+
+        ORDER BY final_score DESC
+        """,
+        (
+            account_id,
+            account_id,
+        ),
+    )
 
 
 @st.cache_data(ttl=30)
@@ -369,6 +526,62 @@ def load_metrics() -> pd.DataFrame:
         ORDER BY created_at DESC
         """
     )
+    
+@st.cache_data(ttl=60)
+def load_cresci_metrics() -> dict:
+    path = CRESCI_OUTPUT_DIR / "cresci_final_metrics.json"
+
+    if not path.exists():
+        return {}
+
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+@st.cache_data(ttl=60)
+def load_cresci_categories() -> pd.DataFrame:
+    path = CRESCI_OUTPUT_DIR / "category_results.csv"
+
+    if not path.exists():
+        return pd.DataFrame()
+
+    try:
+        return pd.read_csv(path)
+    except Exception:
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=60)
+def load_cresci_misclassifications() -> pd.DataFrame:
+    path = (
+        CRESCI_OUTPUT_DIR
+        / "category_misclassifications.csv"
+    )
+
+    if not path.exists():
+        return pd.DataFrame()
+
+    try:
+        return pd.read_csv(path)
+    except Exception:
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=60)
+def load_cresci_summary() -> dict:
+    path = CRESCI_OUTPUT_DIR / "category_summary.json"
+
+    if not path.exists():
+        return {}
+
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
 
 
 @st.cache_data(ttl=30)
@@ -416,21 +629,32 @@ def score_label(value: Optional[float]) -> str:
 
 
 def evidence_strength(row: pd.Series) -> str:
-    components = [
-        row.get("anomaly_score"),
-        row.get("coord_score"),
-        row.get("dup_score"),
-        row.get("network_score"),
-    ]
-    valid = [float(x) for x in components if pd.notna(x)]
-    if len(valid) < 2:
-        return "Limited evidence"
-    strong = sum(v >= 0.70 for v in valid)
-    if strong >= 3:
-        return "Multi-signal evidence"
-    if strong == 2:
-        return "Converging evidence"
-    return "Single-dominant signal"
+    """
+    Return the evidence interpretation produced by the
+    composite scoring pipeline.
+
+    The dashboard should display the persisted evidence status
+    instead of independently reinterpreting component scores.
+    """
+
+    status = row.get("evidence_status")
+
+    if status is None or pd.isna(status):
+
+        return "No evidence status"
+
+    labels = {
+        "strong_support": "Strong Support",
+        "supported": "Supported",
+        "weak_support": "Weak Support",
+        "no_direct_evidence": "No Direct Evidence",
+        "insufficient_data": "Insufficient Data",
+    }
+
+    return labels.get(
+        str(status),
+        str(status).replace("_", " ").title(),
+    )
 
 
 def safe_metric(df: pd.DataFrame, col: str, agg: str = "count", default=0):
@@ -931,71 +1155,518 @@ def render_overview(df: pd.DataFrame, stats: dict):
     )
 
 
-def render_accounts(df: pd.DataFrame, selected_tiers, min_score: int, max_rows: int):
+def render_accounts(
+    df: pd.DataFrame,
+    selected_tiers,
+    min_score: int,
+    max_rows: int,
+):
+
     st.subheader("Account investigation")
-    scored = df[df["influence_score"].notna()].copy()
+
+    scored = df[
+        df["influence_score"].notna()
+    ].copy()
+
     if scored.empty:
-        st.info("No composite scores are available yet.")
+
+        st.info(
+            "No composite scores are available yet."
+        )
+
         return
 
     filtered = scored[
         scored["tier"].isin(selected_tiers)
-        & (scored["influence_score"] >= min_score)
+        & (
+            scored["influence_score"]
+            >= min_score
+        )
     ].copy()
-    filtered["evidence"] = filtered.apply(evidence_strength, axis=1)
-    filtered = filtered.sort_values("influence_score", ascending=False)
 
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Accounts matching filters", len(filtered))
-    c2.metric("Highest score", f"{filtered['influence_score'].max():.1f}" if not filtered.empty else "-")
-    c3.metric("Median score", f"{filtered['influence_score'].median():.1f}" if not filtered.empty else "-")
+    filtered["evidence"] = (
+        filtered.apply(
+            evidence_strength,
+            axis=1,
+        )
+    )
 
-    show = filtered.head(max_rows).copy()
+    filtered["assessment_label"] = (
+        filtered["assessment"]
+        .map(ASSESSMENT_LABELS)
+        .fillna(
+            filtered["assessment"]
+        )
+    )
+
+    filtered = filtered.sort_values(
+        "influence_score",
+        ascending=False,
+    )
+
+    # ==========================================================
+    # SUMMARY METRICS
+    # ==========================================================
+
+    c1, c2, c3, c4 = st.columns(4)
+
+    c1.metric(
+        "Accounts matching filters",
+        len(filtered),
+    )
+
+    c2.metric(
+        "Highest score",
+        (
+            f"{filtered['influence_score'].max():.1f}"
+            if not filtered.empty
+            else "-"
+        ),
+    )
+
+    c3.metric(
+        "High priority patterns",
+        int(
+            (
+                filtered["assessment"]
+                == "high_priority_coordinated_pattern"
+            ).sum()
+        ),
+    )
+
+    c4.metric(
+        "Likely coordinated",
+        int(
+            (
+                filtered["assessment"]
+                == "likely_coordinated_influence"
+            ).sum()
+        ),
+    )
+
+    # ==========================================================
+    # ACCOUNT TABLE
+    # ==========================================================
+
+    st.markdown(
+        "### Filtered accounts"
+    )
+
+    show = filtered.head(
+        max_rows
+    ).copy()
+
     cols = [
-        "account_id", "influence_score", "tier", "evidence",
-        "anomaly_score", "coord_score", "dup_score", "network_score",
-        "cluster_id", "posts_per_day", "hour_entropy", "duplicate_ratio",
+        "account_id",
+        "influence_score",
+        "tier",
+        "assessment_label",
+        "evidence",
+        "confidence_level",
+        "anomaly_score",
+        "coord_score",
+        "temporal_score",
+        "dup_score",
+        "network_score",
+        "cluster_id",
     ]
-    cols = [c for c in cols if c in show.columns]
-    st.dataframe(show[cols], use_container_width=True, height=430)
+
+    cols = [
+        c
+        for c in cols
+        if c in show.columns
+    ]
+
+    st.dataframe(
+        show[cols],
+        use_container_width=True,
+        height=450,
+        hide_index=True,
+    )
 
     st.download_button(
         "Export filtered accounts (CSV)",
-        data=show[cols].to_csv(index=False),
-        file_name="account_investigation.csv",
+        data=show[cols].to_csv(
+            index=False,
+        ),
+        file_name=(
+            "account_investigation.csv"
+        ),
         mime="text/csv",
     )
 
-    st.markdown("### Evidence for this account")
-    account_ids = list(filtered["account_id"].head(500))
-    if not account_ids:
-        st.info("No accounts match the current filters.")
-        return
-
-    selected = st.selectbox("Select an account", account_ids)
-    row = filtered[filtered["account_id"] == selected].iloc[0]
+    # ==========================================================
+    # ACCOUNT SELECTION
+    # ==========================================================
 
     st.markdown(
-        f"<span class='dot' style='background:{TIER_COLORS.get(row['tier'], '#98A2B0')}'></span>"
-        f"<span class='mono'>{str(row['tier']).capitalize()} · {row['evidence']}</span>",
+        "### Detailed account evidence"
+    )
+
+    account_ids = list(
+        filtered["account_id"]
+        .head(500)
+    )
+
+    if not account_ids:
+
+        st.info(
+            "No accounts match the current filters."
+        )
+
+        return
+
+    selected = st.selectbox(
+        "Select an account",
+        account_ids,
+    )
+
+    row = filtered[
+        filtered["account_id"]
+        == selected
+    ].iloc[0]
+
+    tier_color = (
+        TIER_COLORS.get(
+            row["tier"],
+            "#98A2B0",
+        )
+    )
+
+    evidence_status = str(
+        row.get(
+            "evidence_status",
+            "no_direct_evidence",
+        )
+    )
+
+    evidence_color = (
+        EVIDENCE_COLORS.get(
+            evidence_status,
+            "#98A2B0",
+        )
+    )
+
+    assessment = (
+        ASSESSMENT_LABELS.get(
+            row.get("assessment"),
+            row.get("assessment"),
+        )
+    )
+
+    st.markdown(
+        f"""
+        <div class="callout note">
+
+        <span class="tag">
+        ACCOUNT ASSESSMENT
+        </span>
+
+        <b>{assessment}</b><br>
+
+        Tier:
+        <span style="color:{tier_color}">
+        {str(row["tier"]).replace("_", " ").title()}
+        </span>
+
+        &nbsp; | &nbsp;
+
+        Evidence:
+        <span style="color:{evidence_color}">
+        {evidence_strength(row)}
+        </span>
+
+        &nbsp; | &nbsp;
+
+        Confidence:
+        <b>
+        {str(row.get("confidence_level", "N/A")).title()}
+        </b>
+
+        </div>
+        """,
         unsafe_allow_html=True,
     )
 
-    a, b, c, d = st.columns(4)
-    a.metric("Influence", f"{row['influence_score']:.1f}")
-    b.metric("Anomaly", f"{row['anomaly_score']:.2f}" if pd.notna(row['anomaly_score']) else "-")
-    c.metric("Coordination", f"{row['coord_score']:.2f}" if pd.notna(row['coord_score']) else "-")
-    d.metric("Network", f"{row['network_score']:.2f}" if pd.notna(row['network_score']) else "-")
+    # ==========================================================
+    # PRIMARY METRICS
+    # ==========================================================
 
-    evidence_df = pd.DataFrame({
-        "Signal": ["Behavioural anomaly", "Coordination cluster", "Content duplication", "Network structure"],
-        "Normalized value": [row.get("anomaly_score"), row.get("coord_score"), row.get("dup_score"), row.get("network_score")],
-        "Weight": [WEIGHTS.get("anomaly"), WEIGHTS.get("coordination"), WEIGHTS.get("duplication"), WEIGHTS.get("network")],
-    })
-    evidence_df["Contribution"] = evidence_df["Normalized value"] * evidence_df["Weight"] * 100
-    st.dataframe(evidence_df, hide_index=True, use_container_width=True)
+    a, b, c, d, e = st.columns(5)
 
-    st.caption("A score built from several converging signals carries more weight than one driven by a single component.")
+    a.metric(
+        "Influence",
+        f"{row['influence_score']:.1f}",
+    )
+
+    b.metric(
+        "Anomaly",
+        (
+            f"{row['anomaly_score']:.2f}"
+            if pd.notna(
+                row.get("anomaly_score")
+            )
+            else "-"
+        ),
+    )
+
+    c.metric(
+        "Temporal",
+        (
+            f"{row['temporal_score']:.2f}"
+            if pd.notna(
+                row.get("temporal_score")
+            )
+            else "-"
+        ),
+    )
+
+    d.metric(
+        "Network",
+        (
+            f"{row['network_score']:.2f}"
+            if pd.notna(
+                row.get("network_score")
+            )
+            else "-"
+        ),
+    )
+
+    e.metric(
+        "Content",
+        (
+            f"{row['dup_score']:.2f}"
+            if pd.notna(
+                row.get("dup_score")
+            )
+            else "-"
+        ),
+    )
+
+    # ==========================================================
+    # SIGNAL BREAKDOWN
+    # ==========================================================
+
+    st.markdown(
+        "### Detection signal breakdown"
+    )
+
+    signal_df = pd.DataFrame(
+        {
+            "Signal": [
+                "Behavioural anomaly",
+                "Behavioural coordination",
+                "Temporal synchronization",
+                "Content duplication",
+                "Network structure",
+            ],
+
+            "Score": [
+                row.get(
+                    "anomaly_score"
+                ),
+
+                row.get(
+                    "coord_score"
+                ),
+
+                row.get(
+                    "temporal_score"
+                ),
+
+                row.get(
+                    "dup_score"
+                ),
+
+                row.get(
+                    "network_score"
+                ),
+            ],
+        }
+    )
+
+    signal_df["Score"] = (
+        pd.to_numeric(
+            signal_df["Score"],
+            errors="coerce",
+        )
+    )
+
+    fig = px.bar(
+        signal_df,
+        x="Signal",
+        y="Score",
+        range_y=[0, 1],
+        labels={
+            "Score":
+            "Normalized detection score"
+        },
+    )
+
+    fig = style_plot(
+        fig,
+        height=520,
+        title=(
+            "Independent detection signals"
+        ),
+        show_legend=False,
+    )
+
+    st.plotly_chart(
+        fig,
+        use_container_width=True,
+    )
+
+    st.dataframe(
+        signal_df.round(4),
+        hide_index=True,
+        use_container_width=True,
+    )
+
+    # ==========================================================
+    # DIRECT COORDINATION EVENTS
+    # ==========================================================
+
+    st.markdown(
+        "### Direct coordination events"
+    )
+
+    events = load_account_evidence(
+        selected
+    )
+
+    if events.empty:
+
+        st.info(
+            "No direct coordination events "
+            "are stored for this account."
+        )
+
+    else:
+
+        events = events.copy()
+
+        events["other_account"] = (
+            events.apply(
+                lambda r:
+                (
+                    r["target_account_id"]
+                    if r["source_account_id"]
+                    == selected
+                    else r["source_account_id"]
+                ),
+                axis=1,
+            )
+        )
+
+        events["event_label"] = (
+            events["event_type"]
+            .str.replace(
+                "_",
+                " ",
+            )
+            .str.title()
+        )
+
+        display_cols = [
+            "event_label",
+            "other_account",
+            "similarity",
+            "event_time",
+            "source_content_type",
+            "target_content_type",
+        ]
+
+        display_cols = [
+            c
+            for c in display_cols
+            if c in events.columns
+        ]
+
+        st.metric(
+            "Stored events",
+            len(events),
+        )
+
+        st.dataframe(
+            events[
+                display_cols
+            ].head(100),
+            hide_index=True,
+            use_container_width=True,
+            height=400,
+        )
+
+    # ==========================================================
+    # ACCOUNT PAIR EVIDENCE
+    # ==========================================================
+
+    st.markdown(
+        "### Account pair evidence"
+    )
+
+    pairs = load_account_pairs(
+        selected
+    )
+
+    if pairs.empty:
+
+        st.info(
+            "No pair-level coordination "
+            "relationships are stored."
+        )
+
+    else:
+
+        pairs = pairs.copy()
+
+        pairs["partner"] = (
+            pairs.apply(
+                lambda r:
+                (
+                    r["target_account_id"]
+                    if r["source_account_id"]
+                    == selected
+                    else r["source_account_id"]
+                ),
+                axis=1,
+            )
+        )
+
+        pair_cols = [
+            "partner",
+            "final_score",
+            "coordination_type",
+            "content_score",
+            "temporal_score",
+            "network_score",
+            "network_volume_score",
+            "network_reciprocity_score",
+            "network_concentration_score",
+        ]
+
+        pair_cols = [
+            c
+            for c in pair_cols
+            if c in pairs.columns
+        ]
+
+        st.dataframe(
+            pairs[
+                pair_cols
+            ].head(50),
+            hide_index=True,
+            use_container_width=True,
+            height=420,
+        )
+
+    st.caption(
+        "Interpretation: a high Influence Score "
+        "prioritizes an account for investigation. "
+        "Temporal, network, behavioural, or content "
+        "patterns alone do not prove intentional "
+        "coordination."
+    )
 
 
 def render_network(df: pd.DataFrame):
@@ -1443,60 +2114,627 @@ def render_content():
         mime="text/csv",
     )
 
+def render_evidence_dashboard():
+
+    st.subheader(
+        "Coordination evidence overview"
+    )
+
+    events = (
+        load_direct_evidence_events()
+    )
+
+    if events.empty:
+
+        st.info(
+            "No coordination events are currently stored."
+        )
+
+        return
+
+    # ==========================================================
+    # SUMMARY
+    # ==========================================================
+
+    total_events = len(events)
+
+    temporal_events = int(
+        (
+            events["event_type"]
+            == "temporal_synchronization"
+        ).sum()
+    )
+
+    content_events = int(
+        (
+            events["event_type"]
+            == "near_duplicate_content"
+        ).sum()
+    )
+
+    c1, c2, c3 = st.columns(3)
+
+    c1.metric(
+        "Total evidence events",
+        total_events,
+    )
+
+    c2.metric(
+        "Temporal synchronization",
+        temporal_events,
+    )
+
+    c3.metric(
+        "Near-duplicate content",
+        content_events,
+    )
+
+    # ==========================================================
+    # EVENT TYPE DISTRIBUTION
+    # ==========================================================
+
+    st.markdown(
+        "### Evidence distribution"
+    )
+
+    event_counts = (
+        events[
+            "event_type"
+        ]
+        .value_counts()
+        .rename_axis(
+            "event_type"
+        )
+        .reset_index(
+            name="count"
+        )
+    )
+
+    fig = px.bar(
+        event_counts,
+        x="event_type",
+        y="count",
+        labels={
+            "event_type":
+            "Evidence type",
+
+            "count":
+            "Stored events",
+        },
+    )
+
+    fig = style_plot(
+        fig,
+        height=500,
+        title=(
+            "Stored coordination evidence"
+        ),
+        show_legend=False,
+    )
+
+    st.plotly_chart(
+        fig,
+        use_container_width=True,
+    )
+
+    # ==========================================================
+    # TEMPORAL SCORE DISTRIBUTION
+    # ==========================================================
+
+    temporal = events[
+        events["event_type"]
+        == "temporal_synchronization"
+    ].copy()
+
+    if not temporal.empty:
+
+        st.markdown(
+            "### Temporal synchronization evidence"
+        )
+
+        fig = px.histogram(
+            temporal,
+            x="similarity",
+            nbins=25,
+            labels={
+                "similarity":
+                "Temporal similarity"
+            },
+        )
+
+        fig.add_vline(
+            x=0.70,
+            line_dash="dash",
+            annotation_text=(
+                "Strong evidence threshold"
+            ),
+            annotation_position="top right",
+        )
+
+        fig = style_plot(
+            fig,
+            height=540,
+            title=(
+                "Temporal synchronization distribution"
+            ),
+            show_legend=False,
+        )
+
+        st.plotly_chart(
+            fig,
+            use_container_width=True,
+        )
+
+        strong = temporal[
+            temporal["similarity"]
+            >= 0.70
+        ]
+
+        c1, c2, c3 = st.columns(3)
+
+        c1.metric(
+            "Temporal events",
+            len(temporal),
+        )
+
+        c2.metric(
+            "Strong temporal events",
+            len(strong),
+        )
+
+        c3.metric(
+            "Average similarity",
+            f"{temporal['similarity'].mean():.3f}",
+        )
+
+    # ==========================================================
+    # TOP EVIDENCE EVENTS
+    # ==========================================================
+
+    st.markdown(
+        "### Strongest evidence events"
+    )
+
+    display = events.copy()
+
+    display["event_type"] = (
+        display["event_type"]
+        .str.replace(
+            "_",
+            " ",
+        )
+        .str.title()
+    )
+
+    display_cols = [
+        "event_type",
+        "source_account_id",
+        "target_account_id",
+        "similarity",
+        "event_time",
+        "source_influence",
+        "target_influence",
+        "source_tier",
+        "target_tier",
+    ]
+
+    display_cols = [
+        c
+        for c in display_cols
+        if c in display.columns
+    ]
+
+    st.dataframe(
+        display[
+            display_cols
+        ].head(100),
+        hide_index=True,
+        use_container_width=True,
+        height=550,
+    )
+
+    st.download_button(
+        "Export coordination evidence",
+        data=display[
+            display_cols
+        ].to_csv(
+            index=False
+        ),
+        file_name=(
+            "coordination_evidence.csv"
+        ),
+        mime="text/csv",
+    )
+
+    callout(
+        "note",
+        "Interpretation",
+        (
+            "Events represent observed behavioural, "
+            "temporal, or content patterns. "
+            "They are evidence for analyst review and "
+            "are not direct proof of coordinated intent."
+        ),
+    )
 
 def render_benchmark():
     st.subheader("Benchmark & validation")
-    st.caption("Only stored evaluation runs are shown — an empty table means the run hasn't happened yet, not that it scored zero.")
-    metrics = load_metrics()
 
-    if metrics.empty:
+    st.caption(
+        "Cresci-2017 is evaluated separately from the "
+        "production Reddit database."
+    )
+
+    metrics_package = load_cresci_metrics()
+    categories = load_cresci_categories()
+    errors = load_cresci_misclassifications()
+    summary = load_cresci_summary()
+
+    if not metrics_package:
         callout(
-            "limit", "Pending",
-            "No benchmark runs stored yet. The Cresci-2017 / TwiBot-22 evaluation path is wired up and waiting on a run.",
+            "limit",
+            "Cresci-2017 pending",
+            (
+                "Final Cresci benchmark results are not "
+                "available yet."
+            ),
         )
-    else:
-        show = metrics.copy()
-        for c in ["accuracy", "precision", "recall", "f1", "roc_auc"]:
-            if c in show.columns:
-                show[c] = (show[c] * 100).round(2)
-        st.dataframe(show, hide_index=True, use_container_width=True)
 
-        melted = show.melt(
-            id_vars=["model_name"],
-            value_vars=[c for c in ["accuracy", "precision", "recall", "f1", "roc_auc"] if c in show.columns],
-            var_name="metric", value_name="percent",
+        st.code(
+            "python scripts/run_cresci.py",
+            language="bash",
         )
-        fig = px.bar(
-            melted, x="model_name", y="percent", color="metric", barmode="group",
-            labels={"percent": "Metric (%)", "model_name": "Model"},
+        return
+
+    test = metrics_package.get("test", {})
+    validation = metrics_package.get(
+        "validation",
+        {},
+    )
+
+    # --------------------------------------------------
+    # Overall held-out test
+    # --------------------------------------------------
+
+    st.markdown("### Cresci-2017 held-out test")
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+
+    c1.metric(
+        "Accuracy",
+        f"{test.get('accuracy', 0) * 100:.2f}%",
+    )
+
+    c2.metric(
+        "Precision",
+        f"{test.get('precision', 0) * 100:.2f}%",
+    )
+
+    c3.metric(
+        "Recall",
+        f"{test.get('recall', 0) * 100:.2f}%",
+    )
+
+    c4.metric(
+        "F1",
+        f"{test.get('f1', 0) * 100:.2f}%",
+    )
+
+    c5.metric(
+        "ROC-AUC",
+        f"{test.get('roc_auc', 0) * 100:.2f}%",
+    )
+
+    # --------------------------------------------------
+    # Configuration
+    # --------------------------------------------------
+
+    st.markdown("### Benchmark configuration")
+
+    c1, c2, c3, c4 = st.columns(4)
+
+    c1.metric(
+        "Features",
+        str(
+            metrics_package.get(
+                "feature_count",
+                test.get("feature_count", "—"),
+            )
+        ),
+    )
+
+    c2.metric(
+        "Train",
+        f"{metrics_package.get('train_accounts', 0):,}",
+    )
+
+    c3.metric(
+        "Validation",
+        f"{metrics_package.get('validation_accounts', 0):,}",
+    )
+
+    c4.metric(
+        "Test",
+        f"{metrics_package.get('test_accounts', 0):,}",
+    )
+
+    st.write(
+        f"Validation-selected threshold: "
+        f"`{test.get('threshold', 0):.2f}`"
+    )
+
+    # --------------------------------------------------
+    # Validation vs test
+    # --------------------------------------------------
+
+    comparison = pd.DataFrame(
+        [
+            {
+                "Dataset": "Validation",
+                "Accuracy": validation.get(
+                    "accuracy", 0
+                ),
+                "Precision": validation.get(
+                    "precision", 0
+                ),
+                "Recall": validation.get(
+                    "recall", 0
+                ),
+                "F1": validation.get(
+                    "f1", 0
+                ),
+                "ROC-AUC": validation.get(
+                    "roc_auc", 0
+                ),
+            },
+            {
+                "Dataset": "Test",
+                "Accuracy": test.get(
+                    "accuracy", 0
+                ),
+                "Precision": test.get(
+                    "precision", 0
+                ),
+                "Recall": test.get(
+                    "recall", 0
+                ),
+                "F1": test.get(
+                    "f1", 0
+                ),
+                "ROC-AUC": test.get(
+                    "roc_auc", 0
+                ),
+            },
+        ]
+    )
+
+    display_comparison = comparison.copy()
+
+    for column in [
+        "Accuracy",
+        "Precision",
+        "Recall",
+        "F1",
+        "ROC-AUC",
+    ]:
+        display_comparison[column] = (
+            display_comparison[column] * 100
+        ).round(3)
+
+    st.markdown("### Validation vs held-out test")
+
+    st.dataframe(
+        display_comparison,
+        hide_index=True,
+        use_container_width=True,
+    )
+
+    # --------------------------------------------------
+    # Category results
+    # --------------------------------------------------
+
+    if not categories.empty:
+
+        st.markdown(
+            "### Per-category test performance"
         )
-        fig = style_plot(fig, height=600, title="Topics in the dataset", show_legend=False)
-        st.plotly_chart(fig, use_container_width=True)
 
-    st.markdown("### Proposal validation targets")
-    target_df = pd.DataFrame({
-        "Component": [
-            "Isolation Forest",
-            "HDBSCAN",
-            "TF-IDF + cosine",
-            "Composite Influence Score",
-        ],
-        "Proposal target": [
-            "ROC-AUC ≥ 0.80",
-            "Cluster purity ≥ 0.75",
-            "Precision ≥ 0.85 @ similarity 0.90",
-            "Accuracy ≥ 0.78",
-        ],
-        "Status": [
-            "Held-out evaluation not yet run",
-            "Cluster purity not yet validated",
-            "Threshold/precision sweep not yet run",
-            "End-to-end evaluation not yet run",
-        ],
-    })
-    st.dataframe(target_df, hide_index=True, use_container_width=True)
+        display = categories.copy()
 
-    callout("note", "Targets", "These are proposal targets, not results — mark one achieved only after a reproducible evaluation run.")
+        for column in [
+            "accuracy",
+            "precision",
+            "recall",
+            "f1",
+            "specificity",
+            "false_positive_rate",
+            "false_negative_rate",
+        ]:
+            if column in display.columns:
+                display[column] = (
+                    display[column] * 100
+                ).round(2)
+
+        st.dataframe(
+            display,
+            hide_index=True,
+            use_container_width=True,
+        )
+
+        bot_categories = categories[
+            categories["class"] == "bot"
+        ].copy()
+
+        if not bot_categories.empty:
+
+            chart = bot_categories[
+                ["source_group", "f1"]
+            ].dropna()
+
+            if not chart.empty:
+
+                fig = px.bar(
+                    chart,
+                    x="source_group",
+                    y="f1",
+                    labels={
+                        "source_group": "Source group",
+                        "f1": "F1",
+                    },
+                    title="Cresci-2017 F1 by bot category",
+                )
+
+                fig.update_yaxes(
+                    range=[0, 1]
+                )
+
+                fig = style_plot(
+                    fig,
+                    height=520,
+                    title="Cresci-2017 F1 by bot category",
+                    show_legend=False,
+                )
+
+                st.plotly_chart(
+                    fig,
+                    use_container_width=True,
+                )
+
+        human_categories = categories[
+            categories["class"] == "human"
+        ].copy()
+
+        if not human_categories.empty:
+
+            st.markdown(
+                "### Genuine-account false positives"
+            )
+
+            human = human_categories[
+                [
+                    "source_group",
+                    "accounts",
+                    "accuracy",
+                    "specificity",
+                    "false_positive_rate",
+                    "false_positive",
+                ]
+            ].copy()
+
+            for column in [
+                "accuracy",
+                "specificity",
+                "false_positive_rate",
+            ]:
+                human[column] = (
+                    human[column] * 100
+                ).round(3)
+
+            st.dataframe(
+                human,
+                hide_index=True,
+                use_container_width=True,
+            )
+
+    # --------------------------------------------------
+    # Misclassifications
+    # --------------------------------------------------
+
+    if not errors.empty:
+
+        st.markdown(
+            "### Misclassified test accounts"
+        )
+
+        st.warning(
+            f"{len(errors):,} test accounts "
+            "were misclassified."
+        )
+
+        st.dataframe(
+            errors,
+            hide_index=True,
+            use_container_width=True,
+        )
+
+        st.download_button(
+            "Download Cresci misclassifications",
+            data=errors.to_csv(index=False),
+            file_name=(
+                "cresci_misclassifications.csv"
+            ),
+            mime="text/csv",
+        )
+
+    # --------------------------------------------------
+    # Benchmark summary
+    # --------------------------------------------------
+
+    st.markdown("### Benchmark status")
+
+    status = pd.DataFrame(
+        [
+            {
+                "Property": "Benchmark",
+                "Value": metrics_package.get(
+                    "benchmark",
+                    "Cresci-2017",
+                ),
+            },
+            {
+                "Property": "Model",
+                "Value": metrics_package.get(
+                    "model_type",
+                    "RandomForestClassifier",
+                ),
+            },
+            {
+                "Property": "Features",
+                "Value": metrics_package.get(
+                    "feature_count",
+                    40,
+                ),
+            },
+            {
+                "Property": "Test accounts",
+                "Value": metrics_package.get(
+                    "test_accounts",
+                    1653,
+                ),
+            },
+            {
+                "Property": "Source groups",
+                "Value": summary.get(
+                    "source_groups",
+                    8,
+                ),
+            },
+            {
+                "Property": "Misclassified",
+                "Value": summary.get(
+                    "misclassified_accounts",
+                    0,
+                ),
+            },
+        ]
+    )
+
+    st.dataframe(
+        status,
+        hide_index=True,
+        use_container_width=True,
+    )
+
+    callout(
+        "note",
+        "Benchmark role",
+        (
+            "Cresci-2017 is an external benchmark for "
+            "validating the detection methodology. "
+            "Its database remains separate from the "
+            "live Reddit detection database."
+        ),
+    )
 
 
 def render_data_quality():
@@ -1528,13 +2766,65 @@ def render_data_quality():
         st.markdown("**Can't prove alone**")
         st.caption("That an account is a bot, a cluster is malicious, or a pattern was intentionally coordinated.")
 
-    st.markdown("### Next steps")
-    st.markdown(
-        "- TwiBot-22 and additional benchmark loaders\n"
-        "- Held-out evaluation run\n"
-        "- Temporal pair similarity\n"
-        "- Ablation and threshold-sensitivity testing\n"
-        "- Production deployment"
+    st.markdown("### Project status")
+
+    status_df = pd.DataFrame(
+        [
+            {
+                "Component": "Reddit detection pipeline",
+                "Status": "Implemented",
+            },
+            {
+                "Component": "Isolation Forest",
+                "Status": "Implemented",
+            },
+            {
+                "Component": "HDBSCAN",
+                "Status": "Implemented",
+            },
+            {
+                "Component": "Similarity analysis",
+                "Status": "Implemented",
+            },
+            {
+                "Component": "NetworkX analysis",
+                "Status": "Implemented",
+            },
+            {
+                "Component": "Composite Influence Score",
+                "Status": "Implemented",
+            },
+            {
+                "Component": "Cresci-2017 benchmark",
+                "Status": "Completed",
+            },
+            {
+                "Component": "Cresci held-out evaluation",
+                "Status": "Completed",
+            },
+            {
+                "Component": "Cresci temporal ablation",
+                "Status": "Completed",
+            },
+            {
+                "Component": "Cresci category evaluation",
+                "Status": "Completed",
+            },
+            {
+                "Component": "TwiBot-22",
+                "Status": "Pending dataset",
+            },
+            {
+                "Component": "Production deployment",
+                "Status": "Pending",
+            },
+        ]
+    )
+
+    st.dataframe(
+        status_df,
+        hide_index=True,
+        use_container_width=True,
     )
 
 
@@ -1550,6 +2840,7 @@ def main():
         "Overview",
         "Isolation Forest",
         "Accounts",
+        "Evidence",
         "Network",
         "Clusters",
         "Content",
@@ -1558,20 +2849,44 @@ def main():
     ])
 
     with tabs[0]:
-        render_overview(df, stats)
+        render_overview(
+            df,
+            stats,
+        )
+
     with tabs[1]:
-        render_isolation_forest(df)
+        render_isolation_forest(
+            df,
+        )
+
     with tabs[2]:
-        render_accounts(df, selected_tiers, min_score, max_rows)
+        render_accounts(
+            df,
+            selected_tiers,
+            min_score,
+            max_rows,
+        )
+
     with tabs[3]:
-        render_network(df)
+        render_evidence_dashboard()
+
     with tabs[4]:
-        render_clusters(df)
+        render_network(
+            df,
+        )
+
     with tabs[5]:
-        render_content()
+        render_clusters(
+            df,
+        )
+
     with tabs[6]:
-        render_benchmark()
+        render_content()
+
     with tabs[7]:
+        render_benchmark()
+
+    with tabs[8]:
         render_data_quality()
 
 
