@@ -8,12 +8,11 @@ from pathlib import Path
 import joblib
 import matplotlib.pyplot as plt
 import pandas as pd
-
 from sklearn.metrics import (
+    ConfusionMatrixDisplay,
     accuracy_score,
     classification_report,
     confusion_matrix,
-    ConfusionMatrixDisplay,
     f1_score,
     precision_score,
     recall_score,

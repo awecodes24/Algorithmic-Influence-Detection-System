@@ -7,7 +7,6 @@ from pathlib import Path
 
 import joblib
 import pandas as pd
-
 from sklearn.metrics import (
     accuracy_score,
     confusion_matrix,
@@ -15,7 +14,6 @@ from sklearn.metrics import (
     precision_score,
     recall_score,
 )
-
 
 EXPECTED_FEATURE_COUNT = 40
 

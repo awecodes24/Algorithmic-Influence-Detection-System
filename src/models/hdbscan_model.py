@@ -13,15 +13,15 @@
 #
 # Run this AFTER benchmark_preprocessor.py (needs the features table populated)
 
-import numpy as np
-import pandas as pd 
 import sqlite3
-import hdbscan
 from datetime import datetime
+
+import hdbscan
+import numpy as np
+import pandas as pd
 from sklearn.preprocessing import StandardScaler
 
 from src.config import BENCHMARK_DB_PATH, HDBSCAN_PARAMS
-
 
 
 def get_connection():

@@ -27,6 +27,7 @@ VERY_STRONG_PAIR_THRESHOLD = 0.65
 # COORDINATION AGGREGATION
 # ---------------------------------------------------------------------
 
+
 def get_account_coordination_summary(conn):
     """
     Aggregate account-level coordination evidence from account_pairs.
@@ -116,6 +117,7 @@ def get_account_coordination_summary(conn):
 # EVIDENCE STATUS
 # ---------------------------------------------------------------------
 
+
 def determine_evidence_status(
     pair_count: int,
     strong_pair_count: int,
@@ -148,6 +150,7 @@ def determine_evidence_status(
 # CONFIDENCE LEVEL
 # ---------------------------------------------------------------------
 
+
 def determine_confidence_level(
     evidence_status: str,
     max_pair_score: float,
@@ -157,10 +160,7 @@ def determine_confidence_level(
     Determine confidence in the coordination assessment.
     """
 
-    if (
-        evidence_status == "strong_support"
-        and max_pair_score >= 0.65
-    ):
+    if evidence_status == "strong_support" and max_pair_score >= 0.65:
         return "high"
 
     if evidence_status in {
@@ -169,10 +169,7 @@ def determine_confidence_level(
     }:
         return "medium"
 
-    if (
-        evidence_status == "weak_support"
-        or pair_count >= 2
-    ):
+    if evidence_status == "weak_support" or pair_count >= 2:
         return "medium"
 
     return "low"
@@ -181,6 +178,7 @@ def determine_confidence_level(
 # ---------------------------------------------------------------------
 # FINAL ACCOUNT ASSESSMENT
 # ---------------------------------------------------------------------
+
 
 def determine_assessment(
     tier: str,
@@ -191,7 +189,6 @@ def determine_assessment(
     """
 
     if tier == "suspicious":
-
         if evidence_status == "strong_support":
             return "high_priority_coordinated_pattern"
 
@@ -204,7 +201,6 @@ def determine_assessment(
         return "suspicious"
 
     if tier == "organic":
-
         if evidence_status in {
             "strong_support",
             "supported",
@@ -219,6 +215,7 @@ def determine_assessment(
 # ---------------------------------------------------------------------
 # UPDATE SCORES
 # ---------------------------------------------------------------------
+
 
 def update_coordination_evidence():
     """
@@ -240,28 +237,17 @@ def update_coordination_evidence():
     updated = 0
 
     for row in summaries:
-
         account_id = row["account_id"]
 
-        pair_count = int(
-            row["pair_count"] or 0
-        )
+        pair_count = int(row["pair_count"] or 0)
 
-        strong_pair_count = int(
-            row["strong_pair_count"] or 0
-        )
+        strong_pair_count = int(row["strong_pair_count"] or 0)
 
-        very_strong_pair_count = int(
-            row["very_strong_pair_count"] or 0
-        )
+        very_strong_pair_count = int(row["very_strong_pair_count"] or 0)
 
-        max_pair_score = float(
-            row["max_pair_score"] or 0.0
-        )
+        max_pair_score = float(row["max_pair_score"] or 0.0)
 
-        avg_pair_score = float(
-            row["avg_pair_score"] or 0.0
-        )
+        avg_pair_score = float(row["avg_pair_score"] or 0.0)
 
         evidence_status = determine_evidence_status(
             pair_count,
@@ -349,6 +335,7 @@ def update_coordination_evidence():
 # DIAGNOSTICS
 # ---------------------------------------------------------------------
 
+
 def print_summary():
     """
     Print a summary of the updated account assessments.
@@ -381,17 +368,9 @@ def print_summary():
     print("-" * 100)
 
     for row in cur.fetchall():
+        assessment = row["assessment"] if row["assessment"] else "NULL"
 
-        assessment = (
-            row["assessment"]
-            if row["assessment"]
-            else "NULL"
-        )
-
-        print(
-            f"{assessment:<50} "
-            f"{row['count']}"
-        )
+        print(f"{assessment:<50} {row['count']}")
 
     cur.execute(
         """
@@ -412,17 +391,9 @@ def print_summary():
     print("-" * 100)
 
     for row in cur.fetchall():
+        status = row["evidence_status"] if row["evidence_status"] else "NULL"
 
-        status = (
-            row["evidence_status"]
-            if row["evidence_status"]
-            else "NULL"
-        )
-
-        print(
-            f"{status:<50} "
-            f"{row['count']}"
-        )
+        print(f"{status:<50} {row['count']}")
 
     cur.execute(
         """
@@ -467,14 +438,8 @@ def print_summary():
         print("No suspicious coordinated accounts found.")
 
     else:
-
         for row in rows:
-
-            username = (
-                row["username"]
-                if row["username"]
-                else "unknown"
-            )
+            username = row["username"] if row["username"] else "unknown"
 
             print(
                 f"{row['account_id']} | "
@@ -496,11 +461,10 @@ def print_summary():
 # MAIN
 # ---------------------------------------------------------------------
 
+
 def main():
 
-    logger.info(
-        "Updating account-level coordination evidence"
-    )
+    logger.info("Updating account-level coordination evidence")
 
     update_coordination_evidence()
 
