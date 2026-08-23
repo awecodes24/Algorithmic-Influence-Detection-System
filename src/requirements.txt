@@ -1,0 +1,38 @@
+# requirements.txt -- DASHBOARD DEPLOYMENT ONLY
+#
+# This file exists so that Streamlit Community Cloud installs only what
+# src/dashboard.py actually needs, not the full pipeline. Cloud searches
+# the entrypoint's directory BEFORE the repository root and uses only the
+# first dependency file it finds -- so because the deployed entrypoint is
+# src/dashboard.py, this file wins and the root requirements.txt is never
+# read by the deploy. Both are correct; they answer different questions:
+#
+#   ../requirements.txt  -- everything needed to COLLECT and ANALYSE
+#                           (collector.py, run_pipeline.py, benchmarks)
+#   this file            -- everything needed to VIEW the finished result
+#
+# Keep the root file as the source of truth for local pipeline work. If
+# you add an import to dashboard.py, add it here too, or the deployed app
+# will crash on a module the root file quietly provided locally.
+#
+# Why the pipeline packages are deliberately absent:
+# dashboard.py's full transitive import set is streamlit, plotly, pandas,
+# numpy, networkx and stdlib sqlite3 -- traced through its only local
+# imports (src.composite_score, src.config, src.db), none of which reach
+# scikit-learn, hdbscan, apify-client, langdetect, vaderSentiment or
+# matplotlib. Installing the root file on a hosted builder would compile
+# hdbscan (a Cython/C build) for code the dashboard never executes, which
+# is a common and completely avoidable cause of failed deploys.
+#
+# Every version below is a hard pin taken from `pip freeze` in the .venv
+# this dashboard has actually been run from, on Python 3.13.11 -- this is
+# the exact confirm-then-hard-pin step the root requirements.txt asks for
+# in its own header note about streamlit and plotly. Select Python 3.13
+# in Community Cloud's "Configure secrets and Python version" step so the
+# deploy matches the environment these were verified against.
+
+streamlit==1.62.0
+plotly==6.9.0
+pandas==3.0.2
+numpy==2.4.4
+networkx==3.6.1

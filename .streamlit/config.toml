@@ -1,0 +1,22 @@
+# Streamlit configuration for the InfluenceWatch Nepal dashboard.
+#
+# dashboard.py hand-styles its own cards in CSS and sets Plotly's default
+# template to "plotly_dark", but neither of those reaches the chrome that
+# Streamlit renders itself -- sidebar, widgets, dataframes, select boxes.
+# Without a theme here those come up light and sit inside a dark page.
+# The values below mirror the CSS custom properties declared at the top
+# of src/dashboard.py so the two agree.
+
+[theme]
+base = "dark"
+primaryColor = "#7AA2F7"              # --blue / ACCENT in dashboard.py
+backgroundColor = "#091018"           # --bg
+secondaryBackgroundColor = "#121922"  # --card
+textColor = "#EEF2F6"                 # --text
+
+[client]
+# dashboard.py already hides the toolbar by targeting
+# [data-testid="stToolbar"] in CSS. Setting it here states the same
+# intent through a supported option instead of depending on an internal
+# test id that Streamlit is free to rename between releases.
+toolbarMode = "minimal"

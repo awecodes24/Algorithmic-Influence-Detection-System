@@ -8,17 +8,28 @@ venv/
 
 .account_map.json
 
-data/*.db
-data/*.db-wal
-data/*.db-shm
+# --- research data ----------------------------------------------------
+# `data/*` rather than `data/`: git refuses to descend into an excluded
+# directory, so with a blanket `data/` no `!data/...` negation below can
+# ever take effect -- and data/influence.db has to be committed for the
+# deployed dashboard to have a database to read. Matching the children
+# instead leaves `data/` itself un-excluded, which makes the negation
+# legal while still ignoring every subdirectory and any future file
+# dropped in here. That fail-safe matters: data/benchmarks/ is 3.1 GB and
+# data/benchmark/ is 2.2 GB, and the plural one was never matched by the
+# singular data/benchmark/ pattern this replaces -- only by the blanket
+# line, which is now gone.
+data/*
 
-data/raw/
-data/processed/
-data/benchmark/
+# The deployed dashboard's only data source: ~11 MB, opened read-only at
+# runtime. Account ids in it are anonymized (truncated SHA-256, see
+# src/utils/anonymization.py), but raw post and comment text is not, so
+# committing this publishes that text to whoever can read the repo --
+# keep the deployed app unlisted if that matters for your review.
+# Must stay below `data/*` to override it.
+!data/influence.db
 
 outputs/
 
 .vscode/
 .idea/
-data/
-.account_map.json
