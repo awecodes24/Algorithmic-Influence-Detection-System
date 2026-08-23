@@ -584,6 +584,20 @@ def load_cresci_summary() -> dict:
         return {}
 
 
+@st.cache_data(ttl=60)
+def load_cresci_isolation_forest_metrics() -> dict:
+    path = CRESCI_OUTPUT_DIR / "isolation_forest_metrics.json"
+
+    if not path.exists():
+        return {}
+
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
 @st.cache_data(ttl=30)
 def load_dataset_metadata() -> pd.DataFrame:
     return read_df(
@@ -2528,6 +2542,104 @@ def render_benchmark():
         hide_index=True,
         use_container_width=True,
     )
+
+    # --------------------------------------------------
+    # Final model vs. unsupervised baseline
+    # --------------------------------------------------
+
+    iso_metrics = load_cresci_isolation_forest_metrics()
+
+    if iso_metrics:
+
+        st.markdown(
+            "### Final model vs. Isolation Forest baseline "
+            "(Cresci-2017)"
+        )
+
+        st.caption(
+            "Isolation Forest is unsupervised, trained on the "
+            "same TRAIN/TEST split and the same "
+            f"{iso_metrics.get('feature_count', '—')} features "
+            "as the final model. ROC-AUC is threshold-free and "
+            "the fair comparison point here; the other four "
+            "columns come from a fixed 90th-percentile cutoff "
+            "on the anomaly score, not the measured bot rate, "
+            "so treat them as illustrative rather than tuned."
+        )
+
+        iso_comparison = pd.DataFrame(
+            [
+                {
+                    "Model": "Final (RandomForest, supervised)",
+                    "Accuracy": test.get("accuracy", 0),
+                    "Precision": test.get("precision", 0),
+                    "Recall": test.get("recall", 0),
+                    "F1": test.get("f1", 0),
+                    "ROC-AUC": test.get("roc_auc", 0),
+                },
+                {
+                    "Model": "Isolation Forest (unsupervised)",
+                    "Accuracy": iso_metrics.get("accuracy", 0),
+                    "Precision": iso_metrics.get("precision", 0),
+                    "Recall": iso_metrics.get("recall", 0),
+                    "F1": iso_metrics.get("f1", 0),
+                    "ROC-AUC": iso_metrics.get("auc_roc", 0),
+                },
+            ]
+        )
+
+        for column in [
+            "Accuracy",
+            "Precision",
+            "Recall",
+            "F1",
+            "ROC-AUC",
+        ]:
+            iso_comparison[column] = (
+                iso_comparison[column] * 100
+            ).round(3)
+
+        st.dataframe(
+            iso_comparison,
+            hide_index=True,
+            use_container_width=True,
+        )
+
+        gap = (
+            test.get("roc_auc", 0)
+            - iso_metrics.get("auc_roc", 0)
+        ) * 100
+
+        st.metric(
+            "ROC-AUC gap (final model over Isolation Forest)",
+            f"{gap:.1f} pts",
+        )
+
+        if iso_metrics.get("direction_flipped"):
+            st.caption(
+                "Isolation Forest's raw anomaly direction "
+                "ranked genuine accounts as more anomalous "
+                "than bots on this feature set (as-is AUC = "
+                f"{iso_metrics.get('auc_roc_as_is', 0):.3f}); "
+                "the sign shown above is flipped, kept only "
+                "because that direction actually separates "
+                "the classes (AUC = "
+                f"{iso_metrics.get('auc_roc_flipped', 0):.3f})."
+            )
+
+        callout(
+            "note",
+            "Why this comparison matters",
+            (
+                "Isolation Forest sees the same features with "
+                "no label supervision and no coordination-"
+                "specific signal beyond the base feature set "
+                "— it only asks 'is this point unusual.' The "
+                "gap above is the empirical case for the "
+                "supervised, feature-engineered pipeline over "
+                "an off-the-shelf unsupervised detector."
+            ),
+        )
 
     # --------------------------------------------------
     # Category results

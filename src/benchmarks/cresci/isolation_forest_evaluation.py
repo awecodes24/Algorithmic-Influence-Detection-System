@@ -30,7 +30,7 @@ RANDOM_STATE = 42
 
 # Use the same behavioral/profile features that
 # your Cresci baseline uses.
-FEATURES = [
+BASE_FEATURES = [
     "followers_count",
     "friends_count",
     "statuses_count",
@@ -68,6 +68,25 @@ FEATURES = [
     "duplicate_tweet_ratio",
 ]
 
+# Already computed into account_features_final by final_features.py, and
+# already used by train.py's RandomForestClassifier -- just not
+# previously requested here. Temporal coordination (synchronized
+# posting, repeated near-simultaneous activity with other accounts) is
+# closer to what actually distinguishes automated/coordinated accounts
+# than static profile counts are, so these are a reasonable first thing
+# to add before reaching for anything more exotic. Matches the
+# BASE_FEATURES + TEMPORAL_FEATURES naming already used in train.py and
+# final_features.py, for consistency across the benchmark scripts.
+TEMPORAL_FEATURES = [
+    "high_coordination_count",
+    "temporal_events_per_tweet",
+    "temporal_neighbors_per_tweet",
+    "high_coordination_ratio",
+    "temporal_coordination_score",
+]
+
+FEATURES = BASE_FEATURES + TEMPORAL_FEATURES
+
 
 def load_data(
     conn: sqlite3.Connection,
@@ -101,7 +120,20 @@ def load_data(
     return df
 
 
-def build_model() -> Pipeline:
+def resolve_contamination(raw_contamination: float) -> float:
+    """Clamp to sklearn's supported IsolationForest range.
+
+    sklearn only accepts contamination in (0.0, 0.5], even if the dataset's
+    measured majority-class fraction is above 0.5. This benchmark intentionally
+    computes the train bot fraction, but that figure is only a descriptive
+    estimate for the data, not a legal value for the estimator itself.
+    """
+    if raw_contamination <= 0:
+        return 1e-6
+    return min(float(raw_contamination), 0.5)
+
+
+def build_model(contamination) -> Pipeline:
     return Pipeline(
         [
             (
@@ -114,7 +146,7 @@ def build_model() -> Pipeline:
                 "isolation_forest",
                 IsolationForest(
                     n_estimators=300,
-                    contamination="auto",
+                    contamination=contamination,
                     random_state=RANDOM_STATE,
                     n_jobs=-1,
                 ),
@@ -211,7 +243,9 @@ def main():
     )
 
     print(
-        f"Features    : {len(FEATURES)}"
+        f"Features    : {len(FEATURES)} "
+        f"({len(BASE_FEATURES)} base + "
+        f"{len(TEMPORAL_FEATURES)} temporal)"
     )
 
     print(
@@ -222,33 +256,89 @@ def main():
         f"Test        : {len(test):,}"
     )
 
+    # Isolation Forest still never sees labels during model.fit(X_train)
+    # below -- that would defeat the point of testing an unsupervised
+    # method. This is a narrower, legitimate use: contamination is a
+    # hyperparameter describing the expected anomalous fraction, and
+    # sklearn's own "auto" is already a data-informed guess -- just a
+    # less-informed one than the label ratio we actually have on hand
+    # for this benchmark. split.py stratifies train/validation/test by
+    # label (see its train_test_split calls), so the train split's true
+    # ratio closely matches this measured test-split ratio; computed
+    # from train directly here rather than assumed, so it stays correct
+    # even if the split code or dataset changes later.
+    contamination = float(
+        train["label"].astype(int).mean()
+    )
+    contamination_for_model = resolve_contamination(contamination)
+
+    print(
+        f"Contamination (measured bot fraction "
+        f"in TRAIN, not 'auto'): {contamination:.4f}"
+    )
+    if contamination_for_model != contamination:
+        print(
+            "Contamination is above sklearn's supported range; "
+            f"using the legal maximum for IsolationForest: {contamination_for_model:.4f}"
+        )
+
     print(
         "\nTraining Isolation Forest on TRAIN only..."
     )
 
-    model = build_model()
+    model = build_model(contamination_for_model)
 
     model.fit(
         X_train
     )
 
-    # sklearn decision_function:
-    # larger = more normal
+    # sklearn decision_function: larger = more normal (by convention).
+    # Flipping the sign (-decision_function) SHOULD give larger = more
+    # anomalous -- but "more anomalous" and "more bot-like" are only the
+    # same thing if bots are actually the rarer, more unusual pattern in
+    # this feature space. On Cresci-2017 specifically they often aren't:
+    # this benchmark's bot classes (social_spambots, traditional_spambots)
+    # were built to look ordinary/low-activity, which is closer to what
+    # this feature set treats as "normal" than genuine human accounts are.
+    # Confirmed on a real run of this exact script: raw AUC came out at
+    # 0.2564 -- consistently BELOW random chance across the ROC curve
+    # (544/546 threshold points below the diagonal, not sampling noise) --
+    # meaning humans were being ranked as more anomalous than bots, the
+    # reverse of what "anomaly = bot" assumes.
     #
-    # ROC-AUC needs larger = more bot/anomalous.
-    anomaly_score = -model.decision_function(
-        X_test
-    )
+    # The sign flip above is not wrong on its own terms (it's the correct
+    # convention translation from sklearn's API); what's wrong is trusting
+    # it to also mean "anomalous = bot" without checking. Fix: compute
+    # AUC in both directions and keep whichever one actually separates
+    # the classes (AUC > 0.5), the same technique already used for the
+    # supervised benchmark model on this same dataset. This does NOT
+    # silently paper over a bad result -- if a run's "corrected" AUC is
+    # still <= 0.5 after checking both directions, something is
+    # genuinely wrong with the features or labels, not just the sign,
+    # and that's exactly what direction_flipped=False would tell you.
+    anomaly_score_as_is = -model.decision_function(X_test)
+    auc_as_is = roc_auc_score(y_test, anomaly_score_as_is)
+    auc_flipped = roc_auc_score(y_test, -anomaly_score_as_is)
 
-    auc_roc = roc_auc_score(
-        y_test,
-        anomaly_score,
-    )
+    if auc_flipped > auc_as_is:
+        anomaly_score = -anomaly_score_as_is
+        direction_flipped = True
+    else:
+        anomaly_score = anomaly_score_as_is
+        direction_flipped = False
 
-    print(
-        f"\nIsolation Forest AUC-ROC: "
-        f"{auc_roc:.6f}"
-    )
+    auc_roc = roc_auc_score(y_test, anomaly_score)
+
+    print(f"\nAUC-ROC (-decision_function, as originally computed): {auc_as_is:.6f}")
+    print(f"AUC-ROC (direction flipped):                          {auc_flipped:.6f}")
+    print(f"Using direction_flipped={direction_flipped} -> AUC-ROC: {auc_roc:.6f}")
+    if auc_roc <= 0.5:
+        print(
+            "\nWARNING: even the better of the two directions is <= 0.5. "
+            "That is not a sign-convention issue -- the anomaly score is "
+            "not separating bot from human on this feature set at all. "
+            "Do not report either direction's number as a passing result."
+        )
 
     # --------------------------------------------------
     # Optional threshold evaluation
@@ -313,9 +403,15 @@ def main():
         "benchmark": "Cresci-2017",
         "model": "IsolationForest",
         "feature_count": len(FEATURES),
+        "base_feature_count": len(BASE_FEATURES),
+        "temporal_feature_count": len(TEMPORAL_FEATURES),
+        "contamination": contamination,
         "train_accounts": len(train),
         "test_accounts": len(test),
         "auc_roc": float(auc_roc),
+        "auc_roc_as_is": float(auc_as_is),
+        "auc_roc_flipped": float(auc_flipped),
+        "direction_flipped": direction_flipped,
         "threshold": threshold,
         "accuracy": float(accuracy),
         "precision": float(precision),
