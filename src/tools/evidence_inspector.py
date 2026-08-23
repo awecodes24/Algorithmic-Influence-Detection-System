@@ -7,11 +7,11 @@ is associated with it.
 
 Usage:
 
-    python -m src.evidence_inspector ACCOUNT_ID
+    python -m src.tools.evidence_inspector ACCOUNT_ID
 
 Example:
 
-    python -m src.evidence_inspector 296029142755c020
+    python -m src.tools.evidence_inspector 296029142755c020
 """
 
 import sys
@@ -804,7 +804,7 @@ if __name__ == "__main__":
         print()
 
         print(
-            "python -m src.evidence_inspector ACCOUNT_ID"
+            "python -m src.tools.evidence_inspector ACCOUNT_ID"
         )
 
         print()
@@ -816,7 +816,7 @@ if __name__ == "__main__":
         print()
 
         print(
-            "python -m src.evidence_inspector "
+            "python -m src.tools.evidence_inspector "
             "2e2d9d61c8fe7c38"
         )
 

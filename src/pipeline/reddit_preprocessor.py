@@ -1,4 +1,4 @@
-# src/reddit_preprocessor.py
+# src/pipeline/reddit_preprocessor.py
 # Computes behavioral features for Reddit accounts from raw posts/comments
 # Run this AFTER collector.py has collected data into db.py's schema
 

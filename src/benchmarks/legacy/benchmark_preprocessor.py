@@ -6,7 +6,7 @@ import pandas as pd
 import numpy as np
 import sqlite3
 from datetime import datetime
-from config import BENCHMARK_DB_PATH
+from src.config import BENCHMARK_DB_PATH
 
 def get_connection():
     return sqlite3.connect(BENCHMARK_DB_PATH)

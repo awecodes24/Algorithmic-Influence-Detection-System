@@ -34,7 +34,7 @@ if str(ROOT_DIR) not in sys.path:
 CRESCI_OUTPUT_DIR = ROOT_DIR / "outputs" / "cresci" / "final"
 
 from src.config import COSINE_THRESHOLD, TIERS
-from src.composite_score import (
+from src.pipeline.composite_score import (
     COMPOSITE_WEIGHTS,
     MIN_VALID_SIGNALS_FOR_TIER,
     SIGNAL_COVERAGE_FACTORS,

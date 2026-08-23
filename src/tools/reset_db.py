@@ -1,6 +1,6 @@
-# src/reset_db.py
+# src/tools/reset_db.py
 import os
-from config import DB_PATH
+from src.config import DB_PATH
 
 if os.path.exists(DB_PATH):
     os.remove(DB_PATH)
