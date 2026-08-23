@@ -1,4 +1,4 @@
-# src/composite_score.py
+# src/pipeline/composite_score.py
 #
 # Combines all available detection signals into one composite
 # Influence Score (0-100).

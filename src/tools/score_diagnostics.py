@@ -1,4 +1,4 @@
-# src/score_diagnostics.py
+# src/tools/score_diagnostics.py
 #
 # Diagnostic and validation utilities for the composite
 # Influence Score pipeline.

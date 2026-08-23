@@ -1,6 +1,6 @@
 # test_profile_retry.py — temporary, just to test the new batching/delay
-from collector import collect_user_profiles, save_user_profiles
-from db import get_conn
+from src.collector import collect_user_profiles, save_user_profiles
+from src.db import get_conn
 
 conn = get_conn()
 c = conn.cursor()

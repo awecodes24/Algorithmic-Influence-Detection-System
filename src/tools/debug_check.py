@@ -1,7 +1,7 @@
-# src/debug_check.py
+# src/tools/debug_check.py
 import sqlite3
 import os
-from config import DB_PATH
+from src.config import DB_PATH
 
 print("DB_PATH:", DB_PATH)
 print("Absolute:", os.path.abspath(DB_PATH))

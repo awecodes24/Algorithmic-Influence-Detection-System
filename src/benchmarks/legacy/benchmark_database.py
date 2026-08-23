@@ -3,7 +3,7 @@
 
 import sqlite3
 import os
-from config import BENCHMARK_DB_PATH
+from src.config import BENCHMARK_DB_PATH
 
 def get_connection():
     return sqlite3.connect(BENCHMARK_DB_PATH)

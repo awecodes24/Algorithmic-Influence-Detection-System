@@ -52,7 +52,7 @@ from src.db import init_db
 # account_pairs evidence in isolation, just don't wire it into the
 # automated pipeline's writes to scores.
 STEPS = [
-    ("Feature engineering", "src.reddit_preprocessor"),
+    ("Feature engineering", "src.pipeline.reddit_preprocessor"),
     ("Isolation Forest", "src.models.reddit_isolation_forest"),
     ("HDBSCAN clustering", "src.models.reddit_hdbscan"),
     ("Cosine similarity", "src.models.reddit_cosine_similarity"),
@@ -60,7 +60,7 @@ STEPS = [
     ("Temporal coordination", "src.models.reddit_temporal_coordination"),
     ("NetworkX / PageRank", "src.models.reddit_networkx"),
     ("Account pair evidence", "src.models.build_account_pairs"),
-    ("Composite Influence Score", "src.composite_score"),
+    ("Composite Influence Score", "src.pipeline.composite_score"),
 ]
 
 
