@@ -5,550 +5,343 @@ Using Behavioural, Content and Network Analysis
 
 **Team:** Abhinash Kumar Yadav · Abhisek Karki · Bibek Oli · Kaushal Adhikari
 
-**Last updated:** July 2026
 
 ---
 
 ## 1. Summary — Where We Are Right Now
 
-| Stage | Status |
-|---|---|
-| Project structure + environment setup | ✅ Done |
-| Benchmark database schema + Reddit database schema (now separated) | ✅ Done |
-| Cresci-2017 benchmark data loaded | ✅ Done |
-| Benchmark feature engineering / preprocessing | ✅ Done |
-| Isolation Forest on benchmark data (anomaly detection) | ✅ Done — **AUC-ROC ≈ 0.84, meets target (≥0.80)** |
-| Reddit-specific schema + collector (`db.py` / `collector.py`) | ✅ Done, adopted as team standard |
-| Reddit data collection (posts/comments/profiles) | 🔄 In progress — small test batches validated, full-scale run not yet started |
-| Reddit feature engineering (`reddit_preprocessor.py`) | ✅ Written, not yet run at scale |
-| Isolation Forest on real Reddit data | ✅ Written (`reddit_isolation_forest.py`), not yet run at scale |
-| HDBSCAN (coordination clustering) | 🔜 Not started |
-| Cosine Similarity (content duplication) | 🔜 Not started |
-| NetworkX (influence graph / PageRank) | 🔜 Not started |
-| Composite Influence Score | 🔜 Not started |
-| Streamlit dashboard | 🔜 Not started |
-
-**Headline result so far:** our behavioral anomaly detector (Isolation Forest)
-correctly separates bots from humans in the Cresci-2017 benchmark with an
-**AUC-ROC of ≈0.84**, meeting the ≥0.80 target set in our proposal
-(Chapter 5, Expected Output) and in line with the baseline reported in
-Varol et al. [2]. This validates the pipeline logic; it does not yet say
-anything about real Nepal Reddit data, which is the actual point of the
-project and is now the active focus.
-
-Since the last update, the project underwent a deliberate, documented pivot
-from platform-neutral to **Reddit-specific** data collection (see Section 4),
-a teammate-built Reddit schema was adopted as the team standard (Section 3),
-and two significant bugs in real Reddit data collection were found, root-caused,
-and fixed with verified before/after evidence (Section 7).
-
----
-
-## 2. Project Structure (current)
-
-```
-nepal_influence_detector/
-├── data/
-│   ├── raw/                    # future scraped data goes here
-│   ├── processed/              # cleaned data
-│   ├── benchmark/
-│   │   └── cresci-2017/        # benchmark dataset (users.csv + tweets.csv per category)
-│   ├── benchmark.db            # SQLite DB — Cresci-2017 ONLY (Twitter-style schema)
-│   └── influence.db            # SQLite DB — real Reddit data ONLY (db.py schema)
-├── src/
-│   ├── config.py                     # paths + model parameters. DB_PATH (Reddit) and
-│   │                                  # BENCHMARK_DB_PATH (Cresci-2017) are separate constants.
-│   ├── db.py                         # Reddit schema + init_db() — team-standard schema (adopted)
-│   ├── collector.py                  # Reddit collection via Apify (posts/comments/profiles)
-│   ├── reddit_preprocessor.py        # computes all 15 Reddit features into `features` table
-│   ├── benchmark_database.py         # Cresci-2017 schema + init — renamed from database.py
-│   ├── benchmark_loader.py           # loads Cresci-2017 CSVs — renamed from dataloader.py
-│   ├── benchmark_preprocessor.py     # computes benchmark features — renamed from preprocessor.py
-│   └── models/
-│       ├── isolationforest.py            # benchmark anomaly detection (done, AUC ≈0.84)
-│       └── reddit_isolation_forest.py    # real-data anomaly detection (written, not yet run at scale)
-├── dashboard/                   # Streamlit app (not started yet)
-├── outputs/
-│   ├── reports/
-│   └── graphs/
-└── venv/
-```
-
-**Why two separate databases:** `benchmark.db` (Cresci-2017, Twitter-style
-columns like `follower_ratio`, `log_followers`) and `influence.db` (real
-Reddit data, `db.py`'s schema) used to share a single file and a single
-`DB_PATH`. This caused a real bug — see Section 7.1 — where the Reddit
-schema silently overwrote the benchmark schema's `features` table. They are
-now fully separated at the `config.py` level (`DB_PATH` vs
-`BENCHMARK_DB_PATH`), and every benchmark script imports the latter
-specifically. This is the single most important structural fix from this
-update — **never let a script default back to importing `DB_PATH` if it's
-meant to run against the benchmark data**, and vice versa.
-
----
-
-## 3. Database Schemas
-
-### 3.1 — Benchmark schema (`benchmark_database.py` → `benchmark.db`)
-
-Five tables: `accounts`, `posts`, `interactions`, `features`, `results`.
-Twitter/Cresci-style columns throughout (`follower_ratio`, `log_followers`,
-`favourites_ratio`, etc. — see Section 5 for the full feature list and why
-they don't transfer to Reddit).
-
-### 3.2 — Reddit schema (`db.py` → `influence.db`) — **adopted team standard**
-
-Built by a teammate in parallel with the benchmark work, and adopted as the
-team standard for all real Reddit data after evaluation. Considerably more
-detailed than the benchmark schema, since it's designed to support the full
-pipeline (clustering, network analysis, composite scoring) rather than just
-anomaly detection.
-
-Tables: `posts`, `comments`, `accounts` (SHA-256 anonymized IDs, see below),
-`account_activity`, `features` (15 Reddit-specific behavioral features —
-see Section 5.2), `edges`, `content_similarity`, `temporal_similarity`,
-`account_pairs`, `communities`, `scores`, `predictions`,
-`coordination_events`, `dataset_metadata`, `model_metrics`, `experiments`.
-Well-indexed throughout.
-
-**Anonymization:** `accounts.id` is a SHA-256-derived pseudonym and is what
-every other table joins on; it is always populated. `accounts.username` is
-left `NULL` by default (`STORE_RAW_USERNAME=false` in `.env`) — storing the
-raw username next to the hash would make the "anonymized" claim in the
-proposal (Sec 3.4.1) untrue, since the mapping would be trivially reversible
-by anyone with DB access. Only ever set `STORE_RAW_USERNAME=true` for local
-manual verification, and never commit, share, or expose `influence.db` (or
-any export built from it) while it's on.
-
----
-
-## 4. The Reddit Pivot — What Changed and Why
-
-The project moved from a "platform-neutral" design to **Reddit-specific**,
-deliberately, after ruling out the alternatives:
-
-- **YouTube** — no follower/following concept, shallow interaction graphs;
-  not enough structure for meaningful network analysis.
-- **Twitter/X** — API access restrictions blocked live collection entirely.
-
-This is a documented, defensible design decision, not scope creep — it's
-why the benchmark (Cresci-2017, Twitter-style) and the real-world pipeline
-(Reddit) now have genuinely different feature sets (see Section 5).
-
-### Collection tool: Apify
-
-Reddit's official API is inaccessible, so collection uses Apify's
-`trudax/reddit-scraper-lite` actor via `collector.py`. Key operational
-learnings:
-
-- `includeMediaLinks: True` must be set in the actor input, or Apify uses a
-  fast RSS path that silently omits `upVotes`, `upVoteRatio`, and
-  `numberOfComments` entirely.
-- Reddit's own bot defenses (403/429 responses, navigation timeouts) are
-  the main obstacle to collection reliability, not our code — see Section 7.2.
-
-### Topics chosen for data collection
-
-Need genuine discourse volume/controversy, since HDBSCAN/cosine-similarity
-need shared topical context to find a coordination signal at all (see
-Section 9 on what we're actually detecting):
-
-1. Balen Shah government's first 100 days (active political debate)
-2. 2025 social media ban / youth protests aftermath (thematically ideal —
-   literally about platform manipulation; 75+ deaths, 2,000+ injuries)
-3. Constitutional amendments / federalism debate
-4. FATF grey list / economic reform (lower-heat "control" topic for comparison)
-
-Subreddits currently in use: `Nepal`, `NepaliPolitics`, `nepalinews`,
-`NepalSocial`, `SouthAsia`, `Kathmandu`.
-
----
-
-## 5. Feature Engineering — Benchmark vs. Reddit
-
-### 5.1 — Benchmark features (Twitter-style, Cresci-2017 only)
-
-| Feature | What it measures | Notes |
+| Phase | Folder(s) | Status |
 |---|---|---|
-| `posts_per_day` | total_posts / account_age_days | Universal concept |
-| `account_age_days` | days since account creation | Universal concept |
-| `is_empty_account` | 0 followers AND 0 posts | Universal concept |
-| `log_posts` | log(1 + total_posts) | Universal concept |
-| `follower_ratio` | followers / following | Twitter-style only |
-| `followers_per_day` | followers / account_age_days | Twitter-style only |
-| `log_followers` / `log_following` | log-scaled counts | Twitter-style only |
-| `favourites_ratio` | favourites_count / total_posts | Twitter only |
-| `listed_ratio` | listed_count / follower_count | Twitter only |
-| `log_favourites` | log(1 + favourites_count) | Twitter only |
+| Phase 1 — Project Setup & Configuration | `src/` (`config.py`) | ✅ Done |
+| Phase 2 — Database Design & Schema | `src/db.py`, `src/benchmarks/legacy/` | ✅ Done, now migratable |
+| Phase 3 — Benchmark Validation (Cresci-2017) | `src/benchmarks/cresci/`, `src/benchmarks/legacy/`, `src/models/isolationforest.py` | ✅ Core result — **AUC-ROC ≈ 0.84**; expanded analyses added |
+| Phase 4 — Reddit Data Collection | `src/collector.py`, `src/utils/`, `src/tools/`, `src/tools/dev/` | 🔄 In progress — collector substantially hardened |
+| Phase 5 — Feature Engineering & Detection Models | `src/pipeline/reddit_preprocessor.py`, `src/models/` | ✅ Written — 4 original signals + 1 new (temporal) |
+| Phase 6 — Evidence Fusion & Composite Scoring | `src/models/` (pairs/community), `src/pipeline/composite_score.py`, `src/run_pipeline.py` | ✅ Written — new layer beyond original proposal |
+| Phase 7 — Visualization / Dashboard | `src/dashboard.py` | ✅ Written |
+| Phase 8 — Diagnostics & QA Tooling | `src/tools/` | ✅ Written — new this pass |
 
-**Why log-scaling:** raw follower/post counts are heavily skewed. Without
-it, Isolation Forest ends up detecting "who has huge numbers" rather than
-genuinely unusual *behavioral patterns*. `log1p(x) = log(1 + x)` compresses
-extreme outliers so differences at the normal end of the scale stay visible.
+**Headline result so far:** the behavioral anomaly detector (Isolation
+Forest) correctly separates bots from humans in the Cresci-2017
+benchmark with an **AUC-ROC ≈ 0.84**, meeting the ≥0.80 target. Since
+that result, the project has moved from "benchmark validated, Reddit
+pipeline partially built" to **every phase of the pipeline having real
+code behind it** — HDBSCAN, cosine similarity, temporal coordination,
+NetworkX, evidence fusion, community detection, the composite score, and
+the dashboard are all implemented. No folder in `src/` is at "not
+started" anymore.
 
-**Why StandardScaler on top of log-scaling:** log-scaling fixes skew
-*within* a feature; StandardScaler (mean=0, std=1) fixes the fact that
-different features live on totally different numeric scales — without it,
-whichever feature has the biggest raw numbers dominates every distance
-calculation regardless of how meaningful it actually is.
+---
 
-**What moved the benchmark AUC from 0.7361 → 0.84:** adding
-`favourites_ratio`, `listed_ratio`, `log_favourites` — engagement features
-measuring how much an account *consumes* content (likes/favourites given)
-versus how much it *produces* (posts). Real accounts tend to like more than
-they post; automated accounts post constantly but rarely show engagement
-behavior.
+## 2. Phase 1 — Project Setup & Configuration
 
-### 5.2 — Reddit features (`reddit_preprocessor.py`, 15 total)
+**Status: ✅ Done**
 
-Reddit has no "following" concept and doesn't expose per-user upvote
-history via what's scrapable, so none of the Twitter-only features above
-transfer. `reddit_preprocessor.py` computes a different, Reddit-appropriate
-set instead: `age_days`, `posts_per_day`, `comments_per_day`,
-`comment_ratio`, `karma_score`, `avg_score`, `subreddit_count`,
-`active_days`, `hour_entropy`, `duplicate_ratio`, `avg_post_interval`,
+### 2.1 — 📁 `src/`
+`config.py` is the central configuration file. It defines:
+- `DATA_DIR`, `OUTPUTS`, `DB_PATH` (Reddit) and `BENCHMARK_DB_PATH`
+  (Cresci-2017) as separate constants — the fix for the DB-collision bug
+  found earlier in the project.
+- `REDDIT_COLLECTION` — subreddits, search terms, and collection targets
+  (`target_posts: 8000`, `target_accounts: 1500`).
+- `ISOLATION_FOREST`, `HDBSCAN_PARAMS`, `COSINE_THRESHOLD`, `WEIGHTS`,
+  `TIERS` — tunable parameters for every downstream model.
+- `validate_config()` / `ensure_runtime_ready()` — checks scoring weights
+  sum to 1.0 and model parameters are in valid ranges before anything
+  runs.
+
+---
+
+## 3. Phase 2 — Database Design & Schema
+
+**Status: ✅ Done, actively evolving**
+
+### 3.1 — 📁 `src/`
+`db.py` defines every table the pipeline touches: `posts`, `comments`,
+`accounts`, `account_activity`, `features`, `edges`,
+`content_similarity`, `temporal_similarity`, `account_pairs`,
+`communities`, `scores`, `predictions`, `coordination_events`,
+`dataset_metadata`, `model_metrics`, `experiments`, and a new
+`collection_runs` table (fetched/inserted/duplicate/rejected counts per
+collection run, plus `status`/`error_message`).
+
+**New this pass — `_migrate_schema()`:** SQLite's
+`CREATE TABLE IF NOT EXISTS` doesn't add columns to an existing table.
+This function checks `PRAGMA table_info(...)` per table and idempotently
+adds anything missing (`scores.temporal_score`,
+`scores.network_score_topic_scoped`, `scores.evidence_status`,
+`scores.confidence_level`, `scores.assessment`,
+`account_pairs.network_volume_score` / `_reciprocity_score` /
+`_concentration_score`, three new `coordination_events` columns), so
+existing on-disk databases evolve safely instead of needing a manual
+rebuild every time a new signal is added.
+
+### 3.2 — 📁 `src/benchmarks/legacy/`
+`benchmark_database.py` — the separate schema for `benchmark.db`
+(Twitter-style Cresci-2017 columns), preserved from the original
+benchmark/Reddit database split.
+
+---
+
+## 4. Phase 3 — Benchmark Validation (Cresci-2017)
+
+**Status: ✅ Core result — AUC-ROC ≈ 0.84; benchmark tooling substantially expanded**
+
+### 4.1 — 📁 `src/benchmarks/cresci/` (current, active package)
+- `database.py`, `features.py`, `final_features.py` — schema, feature
+  computation, and the finalized feature set behind the verified AUC.
+- `split.py` — a real train/validation/test split, persisted in the
+  database.
+- `temporal.py` — temporal-similarity-style features
+  (`mean_temporal_similarity`, `high_coordination_count`,
+  `temporal_coordination_score`) computed for the **benchmark** dataset
+  too — the same idea used later on real Reddit data (Phase 5).
+- `ablation.py` — a RandomForest-based feature ablation study, to see
+  which features actually drive the result.
+- `category_evaluation.py` — performance broken out by Cresci-2017's
+  actual bot categories (`fake_followers`, `social_spambots_1/2/3`,
+  `traditional_spambots_1-4`) rather than one pooled number.
+- `isolation_forest_evaluation.py` — a fuller evaluation harness
+  (`Pipeline`, `SimpleImputer`, ROC-curve export, `joblib` model
+  persistence) than the original script.
+- `train.py` — training entry point.
+
+### 4.2 — 📁 `src/benchmarks/legacy/`
+`benchmark_loader.py`, `benchmark_preprocessor.py`, `validate.py`,
+`cresci_train.py`, `cresci_evaluate.py`, `cresci_temporal.py`,
+`cresci_temporal_merge.py`, `cresci_compare_models.py`.
+
+### 4.3 — 📁 `src/models/`
+`isolationforest.py` — the benchmark-facing Isolation Forest script,
+imports `BENCHMARK_DB_PATH` specifically.
+
+`ablation.py`, `category_evaluation.py`, and the expanded
+`isolation_forest_evaluation.py` extend the benchmark analysis beyond the
+single pooled AUC number.
+
+---
+
+## 5. Phase 4 — Reddit Data Collection
+
+**Status: 🔄 In progress — collector substantially hardened this pass**
+
+### 5.1 — 📁 `src/`
+`collector.py` (76KB) is where most of this phase's work sits:
+- **Anonymization fix:** `STORE_RAW_USERNAME` flag removed entirely —
+  `accounts.username` is now unconditionally `NULL`. Raw usernames
+  (needed only for account-history mode) now go to a separate,
+  local-only, git-ignored mapping file that nothing else in the pipeline
+  reads.
+- `comments.post_id` read directly from `item.get("postId")`, confirmed
+  against live output (retained from an earlier fix).
+- Comment `subreddit` now read from `"category"` (comments don't carry
+  `parsedCommunityName` the way posts do) — posts and comments now agree
+  on subreddit formatting.
+- Self-reply exclusion fixed — the old `author`/`parentAuthor` check
+  compared a field that doesn't exist in the actor's output; replaced
+  with an id→account-id map resolved from the batch + DB.
+- `posts.sentiment` / `comments.sentiment` now actually computed (VADER,
+  English-only).
+- `backfill_enrichment()` (new) — recomputes topic/language/sentiment for
+  rows already in the DB from before this rewrite, from stored text
+  only, no re-scraping.
+- `collect_user_profiles()` / `save_user_profiles()` — populates
+  `created_utc`/`comment_karma`/`link_karma`, with the batching/delay
+  mitigation for Reddit's anti-bot defenses.
+
+### 5.2 — 📁 `src/utils/`
+`anonymization.py` (new) — the SHA-256 hashing logic pulled out of
+`collector.py` into its own reusable module.
+
+### 5.3 — 📁 `src/tools/`
+`merge_databases.py` (new) — merges teammates' independently-collected
+databases, raw tables only (`posts`, `comments`, `accounts`,
+`dataset_metadata`); derived tables are recomputed separately.
+`reset_db.py`, `checkschema.py`, `debug_check.py` — DB reset/introspection
+utilities.
+
+### 5.4 — 📁 `src/tools/dev/`
+`test_profile_retry.py` — test script for the profile-scrape
+batching/delay logic.
+
+**Still to reach:** the proposal's target of 5,000 posts / 1,000 accounts,
+or `config.py`'s target of 8,000 posts / 1,500 accounts.
+
+---
+
+## 6. Phase 5 — Feature Engineering & Detection Models
+
+**Status: ✅ Written for all four original signals, plus one new one**
+
+### 6.1 — 📁 `src/pipeline/`
+`reddit_preprocessor.py` — computes the 15 Reddit behavioral features
+(`age_days`, `posts_per_day`, `comments_per_day`, `comment_ratio`,
+`karma_score`, `avg_score`, `subreddit_count`, `active_days`,
+`hour_entropy`, `duplicate_ratio`, `avg_post_interval`,
 `avg_comment_interval`, `night_activity_ratio`, `burstiness_score`,
-`engagement_rate`.
+`engagement_rate`) into the `features` table.
 
-Notable computations:
-- **`burstiness_score`** uses the Goh & Barabási formula:
-  `B = (σ_τ - m_τ)/(σ_τ + m_τ)`, requiring ≥3 timestamps.
-- **`duplicate_ratio`** measures self-duplication via `content_hash`.
-- **`karma_score`** and **`age_days`** depend on profile-page data, which is
-  the feature pair most affected by the Bug 2 collection gap (Section 7.2).
-
-### 5.3 — `reddit_isolation_forest.py`
-
-Runs Isolation Forest on real (unlabeled) Reddit data. No `is_bot` ground
-truth exists for real data, so this only outputs anomaly scores plus a
-ranked list of top suspicious accounts (deliberately chosen over
-auto-tiering). `contamination=0.1` is flagged as an assumption requiring
-manual spot-check validation, not a measured value — worth re-examining
-once a real collection run is in hand, since the true anomalous fraction in
-Nepal political Reddit discourse is unknown and may not match Cresci-2017's
-76% bot rate at all.
-
----
-
-## 6. Isolation Forest (Benchmark) — Result and What It Means
-
-**Result: AUC-ROC ≈ 0.84** ✅ (target was ≥ 0.80)
-
-### What AUC-ROC means here
-It measures how well the model's anomaly scores *rank* bots above humans,
-across every possible decision threshold — not just at one fixed cutoff.
-0.5 = random guessing, 1.0 = perfect separation.
-
-### Class imbalance flips the raw result
-Cresci-2017 is 76% bots, 24% humans. Isolation Forest is unsupervised — it
-flags whichever pattern is statistically *rare*, which here initially meant
-flagging **humans** as the anomaly (backwards for our purposes). Raw AUC
-came out as 0.2639 until we recognized this and tested both directions:
-
-```
-AUC (anomaly=bot):    0.2639 (or 0.1614, seen in a later re-run — direction-dependent)
-AUC (anomaly=human):  0.7361 (or 0.8386 after the engagement features)  ← the real signal
-```
-
-The code now automatically checks both directions and picks whichever
-actually separates the classes correctly. This will not be an issue on real
-Reddit data, where bots/coordinated accounts are expected to be a minority
-— but it's important to check for on any new dataset, never assume the raw
-output is oriented as expected.
-
-### A known remaining weakness
-Even at AUC ≈0.84, a naive 0.5 classification threshold still
-misclassifies most individual humans as bots (recall on the Human class as
-low as 0.09 in one run), even though the overall *ranking* (AUC) is good.
-AUC-ROC and threshold-based accuracy/recall are different things — this is
-a threshold-calibration problem for later (e.g. precision-recall-curve
-tuning), not a sign the model doesn't work. Worth listing explicitly as a
-limitation in the final report, and worth being careful not to over-quote
-the confusion-matrix numbers alongside AUC without this caveat attached.
+### 6.2 — 📁 `src/models/`
+- **`reddit_isolation_forest.py`** — anomaly detection on real
+  (unlabeled) Reddit data; ranked anomaly scores, no ground truth so no
+  AUC is possible here the way it is for the benchmark.
+- **`reddit_hdbscan.py`** *(new)* — coordination clustering on 7
+  behavioral features. Sparse accounts are **not** forced into clusters:
+  below-threshold accounts get `coord_score = NULL` /
+  `INSUFFICIENT_DATA`, distinct from analyzed-but-noise
+  (`coord_score = 0.0`, `NO_CLUSTER`) and analyzed-and-clustered
+  (`coord_score > 0`, `ANALYZED`).
+- **`reddit_cosine_similarity.py`** *(new)* — TF-IDF +
+  `NearestNeighbors(cosine)` near-duplicate detection, filtered for
+  minimum length/word count and Reddit's `[deleted]`/`[removed]`
+  placeholders. Writes `content_similarity` pairs and per-account
+  `scores.dup_score`.
+- **`reddit_content_coordination.py`** *(new, second implementation)* —
+  a stricter two-tier content-similarity detector, writing to the
+  **same** `content_similarity` table as the script above (open item,
+  see Phase 6 notes).
+- **`reddit_temporal_coordination.py`** *(new, not in the original
+  4-signal plan)* — detects repeated independent activity bursts shared
+  by the same account pair across multiple, separated bursts.
+- **`reddit_networkx.py`** *(new)* — PageRank over Reddit's reply
+  structure, run twice (whole-activity + topic-scoped) into separate
+  score columns.
+- **`content_diagnostics.py`, `content_threshold_sweep.py`,
+  `content_candidate_inspector.py`** *(new, diagnostic-only)* — check
+  whether `COSINE_THRESHOLD` is actually supported by the dataset.
+- **`inspect_account.py`** *(new)* — CLI dump of everything known about
+  one account.
 
 ---
 
-## 7. Bugs Found and Fixed This Update
+## 7. Phase 6 — Evidence Fusion & Composite Scoring
 
-### 7.1 — Benchmark and Reddit databases silently colliding
+**Status: ✅ Written — new layer beyond the original proposal's scope**
 
-**Symptom:** `isolationforest.py` (benchmark) failed with
-`sqlite3.OperationalError: no such column: follower_ratio`, then later
-`no such column: favourites_ratio`.
+### 7.1 — 📁 `src/models/`
+- **`build_account_pairs.py`** *(new)* — fuses content, temporal, and
+  network evidence per account pair. Network-only evidence stays
+  conservative (capped at 0.40 final score), content-only evidence is
+  the strongest single-source signal, and independent evidence sources
+  get an explicit convergence bonus (2 sources: ×1.10 + 0.15; 3 sources:
+  ×1.20 + 0.25) instead of a plain average.
+- **`community_detection.py`** *(new)* — Louvain community detection on
+  the fused `account_pairs` evidence graph, not on raw interaction edges.
+- **`community_validator.py`** *(new)* — classifies each community's
+  evidence strength and composition without claiming to prove intent.
+- **`update_coordination_evidence.py`** *(new, deliberately standalone)*
+  — a narrower, pair-only evidence summary, explicitly excluded from the
+  automated pipeline because it was found to disagree with
+  `composite_score.py`'s fuller answer depending on run order.
 
-**Root cause:** `config.py` had a single `DB_PATH`, and an older,
-independently-hardcoded `DB_PATH` inside `benchmark_database.py` (formerly
-`database.py`) happened to resolve to the exact same physical file
-(`data/influence.db`) as the Reddit pipeline's `db.py`. Both pipelines were
-always pointing at the same file; it just hadn't caused visible damage
-until the Reddit schema's `features` table (via `db.py`'s `init_db()`)
-effectively replaced the benchmark schema's `features` table, since two
-differently-shaped tables can't coexist under the same name.
+### 7.2 — 📁 `src/pipeline/`
+**`composite_score.py`** *(restructured)* — now a 5-signal weighted
+score (anomaly 30%, coordination 25%, temporal 20%, duplication 15%,
+network 10%). Missing signals aren't treated as 0 — weights are
+renormalized and a `SIGNAL_COVERAGE_FACTORS` confidence penalty applies.
+Also computes `evidence_status` (insufficient_data → strong_support) and
+a human-readable `assessment` label (likely_organic →
+likely_coordinated_influence).
 
-**Fix:** Added a dedicated `BENCHMARK_DB_PATH` constant in `config.py`,
-pointing at a new, separate `data/benchmark.db`. Every benchmark script
-(`benchmark_database.py`, `benchmark_loader.py`, `benchmark_preprocessor.py`,
-`models/isolationforest.py`) now imports `BENCHMARK_DB_PATH` specifically
-instead of the shared `DB_PATH`. Along the way, also caught and fixed: a
-leftover reference to the old bare `DB_PATH` name inside
-`benchmark_database.py`'s print statement, and a copy-paste duplicate
-column-definition bug (`favourites_count`/`listed_count` accidentally
-declared twice in the same `CREATE TABLE` statement) introduced while
-adding the three missing engagement columns.
-
-**Verified fixed:** rebuilt `benchmark.db` from scratch (14,368 accounts,
-6.6M+ tweets, all 11 benchmark features computed) and reproduced
-AUC-ROC = 0.8386 — consistent with the original 0.8397 within normal
-`IsolationForest` run-to-run variance. `influence.db` (Reddit data)
-confirmed untouched throughout.
-
-**Lesson for the team:** a shared `DB_PATH` constant is only safe if every
-script that touches the database actually imports it from the same place.
-A script that independently recomputes its own path (even if it resolves
-to the same file today) is a landmine — it'll keep working right up until
-something else changes the schema at that path, with no warning.
-
-### 7.2a — `comments.post_id` was 0% populated
-
-**Symptom:** every comment lost its link back to its parent post — even
-top-level comments, which should link directly.
-
-**Root cause (initially assumed, later disproven):** an earlier version of
-`collector.py` assumed the actor's comment items exposed no direct
-post-reference field (`postId`/`linkId`), based on a reading of the actor's
-*documented* schema, and instead tried to resolve `post_id` by walking a
-`parentId` chain up to a `t3_`-prefixed (post) id via `resolve_post_id()`.
-
-**Actual root cause, found by adding a debug print of raw comment items and
-checking real Apify output directly:** `item.get("postId")` **is** present
-on every comment item, already correctly `t3_`-prefixed, for both top-level
-comments (confirmed) and nested replies (confirmed — `postId` correctly
-points to the thread root regardless of nesting depth). The documented
-schema assumption didn't match observed behavior.
-
-**Fix:** `post_id = item.get("postId")` directly, replacing the
-`resolve_post_id()` chain-walk. Confirmed via direct DB query
-(`SELECT id, post_id, parent_id FROM comments`) that new comments collected
-after the fix have `post_id` populated correctly; old rows from before the
-fix remain `NULL` (expected — `INSERT OR IGNORE` never retroactively
-repairs existing rows; a handful of pre-fix rows were left as-is rather
-than manually patched, since the volume was trivial).
-
-**Lesson for the team:** trust real observed data over a data source's
-*documented* schema when the two disagree — this is the second time this
-exact lesson has come up on this project (see also Section 5.2's
-Romanized-Nepali language/sentiment caveats, and Appendix A generally).
-When something looks structurally broken, add a debug print of the raw
-item and look at it directly before assuming the fix requires complex
-logic.
-
-### 7.2b — Account profile data (`created_utc`, `comment_karma`,
-`link_karma`) only populated for ~11% of accounts
-
-**Symptom:** `collect_user_profiles()` was failing/timing out on most
-individual profile-page fetches, leaving `age_days` and `karma_score` (2 of
-15 Reddit features) missing for the large majority of accounts.
-
-**Root cause:** Reddit's own anti-bot defenses (403/429 responses,
-60-second navigation timeouts) actively and aggressively block
-profile-page scraping specifically — much more so than subreddit-listing
-scraping (posts/comments), which came through comparatively reliably
-throughout. This is adversarial behavior on Reddit's side, not a bug in our
-code, and is not something we can expect to fully eliminate.
-
-**Mitigation applied:** reduced `collect_user_profiles()`'s `batch_size`
-from 90 to 15, added a 30-second delay between batches, and bumped
-`maxRequestRetries` from 2 to 3. Smaller, spaced-out batches give Apify's
-own retry mechanism room to recover from transient 403/429s before giving
-up, rather than hammering Reddit with 90 near-simultaneous requests.
-
-**Verified improved, across three separate test runs at increasing scale:**
-
-| Run | Batches | Result |
-|---|---|---|
-| Original (pre-fix) | — | ~11% of accounts had profile data |
-| Test 1 (10 usernames) | 1 | 8/10 updated |
-| Test 2 (26 usernames) | 2 | 20/26 updated in-run; delay confirmed firing (`Waiting 30s before next batch...`) |
-| Cumulative across all runs | — | **42/49 accounts (≈86%) with profile data** |
-
-**Not fully solved, and shouldn't be expected to be:** even with this
-mitigation, some fraction of profile fetches will likely still fail at
-full scale (~1,000 accounts), since Reddit's blocking isn't perfectly
-deterministic and may behave differently under sustained higher volume
-than in these test batches. Decision needed before running
-`reddit_preprocessor.py` at scale: how should `age_days`/`karma_score` be
-handled for accounts where profile data never resolves (e.g. median
-imputation, or excluding those two features from the composite score for
-affected accounts only) — this is a design decision to make explicitly,
-not something to leave implicit.
-
-**Lesson for the team:** when a third-party scraping target is actively
-adversarial (rate limiting, bot detection), the fix is request *pattern*
-(smaller batches, spacing, retries) more than request *count* (raising
-retry limits alone did little in earlier tests without also shrinking
-batch size). Also worth noting for the final report as a documented,
-expected methodological limitation rather than something to hide or be
-surprised by later.
+### 7.3 — 📁 `src/`
+**`run_pipeline.py`** *(new)* — orchestrates all 9 steps in dependency
+order (feature engineering → isolation forest → HDBSCAN → cosine
+similarity → content coordination → temporal coordination → networkx →
+account pairs → composite score), with in-line reasoning for why
+`update_coordination_evidence.py` is excluded.
 
 ---
 
-## 8. Key Lessons From Debugging (cumulative, so the team doesn't repeat them)
+## 8. Phase 7 — Visualization / Dashboard
 
-- **A shared config constant is only safe if every script actually imports
-  it from the same place** — see Section 7.1. A script that independently
-  recomputes its own path is a landmine.
-- **Always run the relevant `*_database.py`/`db.py` init before loading
-  data.** If a table doesn't exist yet, inserts can fail and get silently
-  swallowed by a broad `except: continue` — the script won't crash, it'll
-  just report `0 rows loaded` with no explanation.
-- **`INSERT OR IGNORE` silently skips existing rows.** If a bug is fixed in
-  how a column is computed but old data isn't wiped first, `INSERT OR
-  IGNORE` keeps the old (broken) values forever, because the primary key
-  already exists. Rebuild from a clean DB whenever a schema or
-  loader/collector bug has been fixed and old rows might be stale.
-- **A missing `return` statement returns `None` silently** — caused
-  `safe_str()` to corrupt every string field it touched for a long stretch
-  of debugging, no exception ever thrown.
-- **Match column names exactly between `CREATE TABLE`, `INSERT`, and
-  `SELECT`.** Most benchmark-era bugs were simple mismatches between these
-  three places, not deep logic bugs.
-- **Trust real observed data over a data source's documented schema when
-  they disagree** — see Section 7.2a. When something is silently wrong
-  (a column is always 0/NULL, or always the same value), check the raw
-  source data directly with a throwaway debug print *before* assuming the
-  bug is in the pipeline's logic.
-- **When a third-party scraper is being actively rate-limited/blocked,
-  fix the request pattern, not just the retry count** — see Section 7.2b.
-- **Watch for copy-paste duplication bugs** — both a duplicated
-  `compute_features()` function (benchmark era) and a duplicated pair of
-  column definitions inside one `CREATE TABLE` statement (this update)
-  came from the same underlying habit of pasting new code near similarly-
-  named existing code instead of directly adjacent to what's being
-  extended.
+**Status: ✅ Written — was "Not started" as of the previous update**
+
+### 8.1 — 📁 `src/`
+**`dashboard.py`** (~48KB) — Streamlit app, "InfluenceWatch Nepal," 9
+tabs: **Overview, Isolation Forest, HDBSCAN, Cosine Similarity,
+NetworkX, Coordination Evidence, Investigate, Cresci Benchmark, Data
+Coverage**. Reads weights/tiers directly from `composite_score.py` and
+`config.py` rather than hardcoding its own copies. Every number is read
+from the live database or a saved benchmark output file by design.
+
+**Run command:** `streamlit run src/dashboard.py`, intended after
+`python -m src.run_pipeline` has populated the scoring tables.
 
 ---
 
-## 9. A Note on What We're Actually Detecting
+## 9. Phase 8 — Diagnostics & QA Tooling
 
-Worth the whole team internalizing this, since it shapes data collection:
-we are not measuring "is this topic popular" — we're measuring whether the
-*appearance* of consensus around a topic is organic (many independent
-people) or manufactured (a coordinated group posing as many). The topic is
-just the shared context that makes clustering and duplication scores
-meaningful; the accounts and their synchronized behavior are the actual
-thing being detected. This is why data collection is topic-focused
-(3–5 specific discussions/events, Section 4) rather than random — random
-posts give HDBSCAN and cosine similarity nothing meaningful to compare
-against.
+**Status: ✅ New this pass**
 
----
+### 9.1 — 📁 `src/tools/`
+- **`verify_setup.py`** — checks required packages import and config/DB
+  paths resolve before anything else runs.
+- **`score_diagnostics.py`** — composite-score distributions, coverage,
+  tier/assessment breakdowns, consistency checks. Read-only.
+- **`pair_diagnostics.py`** — inspects `account_pairs` output.
+- **`evidence_inspector.py`** — `python -m src.tools.evidence_inspector
+  ACCOUNT_ID` — explains exactly why an account got its score.
+- **`checkschema.py`, `debug_check.py`** — low-level schema/DB-path
+  introspection.
+- **`reset_db.py`** — wipes `influence.db` for a clean rebuild.
+- **`merge_databases.py`** — see Phase 4.
 
-## 10. Next Steps
-
-1. **Scale up Reddit collection** toward the proposal's stated targets
-   (5,000 posts / 1,000 unique accounts, Sec 3.4.1). Expect this to take
-   real wall-clock time given the batch delays in profile collection —
-   plan to kick off and let it run rather than expecting a quick turnaround.
-2. **Decide on missing-feature handling** for accounts where profile data
-   never resolves (Section 7.2b) before running `reddit_preprocessor.py`
-   at scale.
-3. **Run `reddit_preprocessor.py` and `reddit_isolation_forest.py`** at
-   scale once collection is further along; sanity-check the
-   `contamination=0.1` assumption against a manual spot-check of top
-   flagged accounts.
-4. **HDBSCAN clustering** — group accounts with synchronized posting
-   behavior into coordination clusters (Coordination Score, Eq. 4.5).
-5. **Cosine Similarity** — TF-IDF content comparison across posts within a
-   topic, to detect near-duplicate campaigns.
-6. **NetworkX / PageRank** — build the interaction graph and compute
-   network influence scores (also populates `edges`/`communities`).
-7. **Composite Influence Score** — combine all four signals per the
-   proposal's weighting (40% anomaly, 40% coordination, 10% duplication,
-   10% network).
-8. **Streamlit dashboard** — reads only from the `scores`/`predictions`
-   tables; no model computation happens in the dashboard itself.
+### 9.2 — 📁 `src/tools/dev/`
+**`test_profile_retry.py`** — scratch/manual test script, not part of
+the production pipeline.
 
 ---
 
-## Appendix A — Detailed Debugging Log (Benchmark Era)
+## 10. Key Lessons From This Pass
 
-Kept for reference in case similar issues resurface in the Reddit pipeline.
+- **Schema drift is now handled by infrastructure, not memory** —
+  `_migrate_schema()` (Phase 2) means new columns no longer require a
+  manual `ALTER TABLE` or full DB rebuild.
+- **A "safe" default can silently break an unrelated feature** —
+  `STORE_RAW_USERNAME=false` was the correct anonymization default, but
+  it also happened to make account-history mode a silent no-op. The fix
+  was recognizing two features shared one field with incompatible
+  requirements, not changing the default.
+- **A second implementation of the same signal needs a deliberate
+  decision, not silent coexistence** — `reddit_cosine_similarity.py` and
+  `reddit_content_coordination.py` (Phase 5) both write to
+  `content_similarity`; this should be resolved before final results are
+  reported.
+- **A stale/unused config constant is a landmine even when nothing is
+  broken yet** — `config.py`'s `WEIGHTS` (Phase 1) vs.
+  `composite_score.py`'s `COMPOSITE_WEIGHTS` (Phase 6) — the same class
+  of issue that caused real damage earlier in the project when the DB
+  path constants diverged.
+- **Independent evidence sources should be rewarded for converging, not
+  just averaged** — the explicit convergence bonus in
+  `build_account_pairs.py` (Phase 6) is a defensible, citable
+  methodological choice worth writing up explicitly.
 
-### A.1 — File naming mismatches
-Early files were saved as `dataloader.py` and `verifysetup.py` instead of
-the conventional `data_loader.py` / `verify_setup.py`. Not itself a bug,
-but caused confusion when running commands from memory/instructions that
-assumed underscores.
+---
 
-### A.2 — Wrong working directory
-Scripts failed with "No such file or directory" when run from the wrong
-folder, including config imports (`ModuleNotFoundError: No module named
-'config'`) when run from the project root instead of `src/`. Always `cd`
-into the correct folder and confirm with `pwd` before running any script,
-or adjust `sys.path` explicitly.
+## 11. Next Steps
 
-### A.3 — Cresci-2017 nested folder structure
-The dataset unpacks as a **double-nested** structure:
-`cresci-2017/genuine_accounts.csv/genuine_accounts.csv/users.csv` (the
-`.csv` suffix is actually a folder name, repeated twice). `find_folder()`
-checks the double-nested path first, then falls back to single-nested.
-
-### A.4 — Encoding errors reading tweets.csv
-`UnicodeDecodeError` on rows containing non-UTF-8 characters. Fixed by
-reading with `encoding='latin-1'` instead of default UTF-8, with row-level
-try/except so one bad row doesn't kill the whole load.
-
-### A.5 — `accounts` table accidentally never created
-A copy-paste error had a `CREATE TABLE` block commented as "ACCOUNTS
-table" but which actually created a table named `features` instead. Caught
-by explicitly listing table names via `sqlite_master`.
-
-### A.6 — `safe_str()` missing a return statement
-```python
-def safe_str(value, default=""):
-    try:
-        if pd.isna(value):
-            return default
-    except (ValueError, TypeError):
-        return default
-    # no return here — silently returned None for every valid value
-```
-Silently corrupted `created_at`, `username`, and `lang` for all 14,368
-accounts, no exception ever thrown. Caught by comparing raw pandas values
-against what ended up in the database.
-
-### A.7 — `INSERT OR IGNORE` masking stale data after bug fixes
-Old broken rows persisted after loader fixes because `account_id` already
-existed as a primary key. Fixed each time via a full DB rebuild, not just
-re-running the loader on top of old data.
-
-### A.8 — Duplicated function definitions merging incorrectly
-`preprocessor.py` once contained two full copies of `compute_features()`
-pasted one after another, producing confusing partial output from both
-blocks in the same run. Fixed by deleting the file and pasting one clean
-version.
-
-### A.9 — Isolation Forest direction inversion due to class imbalance
-Covered in Section 6 — a below-random AUC (0.2639) turned out to indicate
-correct separation in the opposite direction from assumed, due to bots
-being the majority class in Cresci-2017.
-
-### A.10 — Schema drift between CREATE TABLE, INSERT, and SELECT
-Recurring theme: new columns added to Python code (`INSERT`/`SELECT`
-statements) before the corresponding schema change was actually applied to
-the live `.db` file. SQLite does not auto-migrate schemas.
-
-### A.11 — Two independent databases sharing one file path (this update)
-See Section 7.1 in full. The most significant structural bug found this
-update — worth its own top-level section rather than folding into the
-appendix, given how much time it cost and how easily it could recur if
-`config.py`'s two DB-path constants aren't kept genuinely separate in every
-future script.
-
-### A.12 — `collector.py`'s documented-schema assumption for `post_id`
-was wrong (this update)
-See Section 7.2a in full. A case where a *reasonable, documented*
-assumption (checked against the actor's published schema) still turned out
-to be false in practice — reinforcing the lesson that raw data should be
-checked directly whenever something looks structurally broken, even when
-there's a plausible-sounding explanation already on hand.
+1. **Run the full pipeline end-to-end** — `python -m src.run_pipeline`
+   against `data/influence.db`, then use `src.tools.verify_setup` /
+   `score_diagnostics.py` / `pair_diagnostics.py` to sanity-check output.
+2. **Resolve the two content-similarity implementations** (Phase 5).
+3. **Reconcile the weight/contamination mismatches** (Phase 1) between
+   `config.py` and the scripts that should be using it.
+4. **Scale up Reddit collection** (Phase 4) toward the proposal's
+   targets — the collector is meaningfully more robust now than at the
+   last update.
+5. **Run the new benchmark analyses** (Phase 3) — `ablation.py`,
+   `category_evaluation.py`, `isolation_forest_evaluation.py` — and
+   capture real output.
+6. **Run the full pipeline on a real, at-scale dataset** (Phases 5–7)
+   and capture cluster counts, coordination events, PageRank rankings,
+   account-pair evidence, communities, and composite scores for the
+   final report.
+7. **Decide on missing-feature handling** for accounts where profile
+   data never resolves (`age_days`/`karma_score`) — flagged previously,
+   no imputation logic found in the current `reddit_preprocessor.py` or
+   `reddit_isolation_forest.py`.
+8. **Write up the deliberate scope additions** (temporal coordination,
+   community detection, evidence fusion — Phase 6) as defensible
+   extensions beyond the proposal's four named algorithms, the same way
+   the Reddit pivot was documented as a deliberate design decision.
