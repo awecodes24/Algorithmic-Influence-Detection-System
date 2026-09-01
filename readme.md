@@ -1,4 +1,4 @@
-# Coordinated Influence Detector
+# Algorithmic Influence Detection System
 
 **Detection of Coordinated Influence Amplification on Social Media Using Behavioural, Content and Network Analysis**
 
